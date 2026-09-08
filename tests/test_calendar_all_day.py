@@ -283,3 +283,116 @@ class TestViewRange:
         settings = {"weekStartDay": "1", "displayPastWeeks": "2", "displayWeeks": "3"}
         start, end, _ = calendar.get_view_range("dayGrid", datetime(2026, 9, 8), settings)
         assert (end - start).days == calendar.get_day_grid_weeks(settings) * 7
+
+
+class TestCaldavHardening:
+
+    def test_entity_declarations_are_refused(self, calendar):
+        # ElementTree expands internal entities, so a nested-entity bomb from a
+        # hostile or compromised calendar server could stall the device.
+        bomb = (
+            b'<?xml version="1.0"?>'
+            b'<!DOCTYPE lolz [<!ENTITY lol "lol">'
+            b'<!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">]>'
+            b'<D:multistatus xmlns:D="DAV:"><D:response>&lol2;</D:response></D:multistatus>'
+        )
+        with pytest.raises(RuntimeError, match="entities"):
+            calendar.merge_caldav_response(bomb)
+
+    def test_ordinary_responses_still_parse(self, calendar):
+        merged = calendar.merge_caldav_response(multistatus(ics_resource("a")))
+        assert len([c for c in merged.subcomponents if c.name == "VEVENT"]) == 1
+
+
+NEXTCLOUD_LISTING = b'''<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:cal="urn:ietf:params:xml:ns:caldav"
+               xmlns:x1="http://apple.com/ns/ical/">
+  <d:response>
+    <d:href>/remote.php/dav/calendars/ann/</d:href>
+    <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype>
+    </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/remote.php/dav/calendars/ann/personal/</d:href>
+    <d:propstat><d:prop>
+      <d:resourcetype><d:collection/><cal:calendar/></d:resourcetype>
+      <d:displayname>Personal</d:displayname>
+      <x1:calendar-color>#0f9edb</x1:calendar-color>
+    </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/remote.php/dav/calendars/ann/shared/</d:href>
+    <d:propstat><d:prop>
+      <d:resourcetype><d:collection/><cal:calendar/></d:resourcetype>
+      <d:displayname>Shared</d:displayname>
+    </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/remote.php/dav/calendars/ann/inbox/</d:href>
+    <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype>
+      <d:displayname>Inbox</d:displayname>
+    </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+  </d:response>
+</d:multistatus>'''
+
+
+class TestCaldavDiscovery:
+
+    def test_only_calendar_collections_are_returned(self, calendar):
+        found = calendar.caldav_collections(
+            NEXTCLOUD_LISTING, "https://cloud.example", "/remote.php/dav/calendars/ann/")
+        names = [c["name"] for c in found]
+        # The home collection itself and the non-calendar inbox are both skipped.
+        assert names == ["Personal", "Shared"]
+        assert found[0]["url"] == "https://cloud.example/remote.php/dav/calendars/ann/personal/"
+
+    def test_calendar_colour_is_picked_up_when_published(self, calendar):
+        found = calendar.caldav_collections(
+            NEXTCLOUD_LISTING, "https://cloud.example", "/remote.php/dav/calendars/ann/")
+        assert found[0]["color"] == "#0f9edb"
+        assert found[1]["color"] is None      # server published none
+
+    def test_discovery_listing_rejects_entity_declarations(self, calendar):
+        with pytest.raises(RuntimeError, match="entities"):
+            calendar.caldav_collections(
+                b'<!DOCTYPE x [<!ENTITY a "a">]><d:multistatus xmlns:d="DAV:"/>',
+                "https://cloud.example", "/x/")
+
+    def test_discover_action_needs_a_url(self, calendar):
+        with pytest.raises(RuntimeError, match="URL is required"):
+            calendar.action_discover({})
+
+
+class _Resp:
+    def __init__(self, content):
+        self.content = content
+
+
+PRINCIPAL_RESPONSE = b'''<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:"><d:response><d:href>/remote.php/dav/</d:href>
+<d:propstat><d:prop><d:current-user-principal>
+<d:href>/remote.php/dav/principals/users/ann/</d:href>
+</d:current-user-principal></d:prop></d:propstat></d:response></d:multistatus>'''
+
+HOME_RESPONSE = b'''<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:cal="urn:ietf:params:xml:ns:caldav">
+<d:response><d:href>/remote.php/dav/principals/users/ann/</d:href>
+<d:propstat><d:prop><cal:calendar-home-set>
+<d:href>/remote.php/dav/calendars/ann/</d:href>
+</cal:calendar-home-set></d:prop></d:propstat></d:response></d:multistatus>'''
+
+
+class TestCaldavHrefNamespaces:
+
+    def test_principal_href_is_read_from_the_dav_namespace(self, calendar):
+        assert calendar.caldav_href(_Resp(PRINCIPAL_RESPONSE), "D:current-user-principal") \
+            == "/remote.php/dav/principals/users/ann/"
+
+    def test_home_set_href_is_read_from_the_caldav_namespace(self, calendar):
+        # calendar-home-set is CalDAV, not DAV; looking for it under DAV silently
+        # returns nothing and discovery reports "no calendars found".
+        assert calendar.caldav_href(_Resp(HOME_RESPONSE), "C:calendar-home-set") \
+            == "/remote.php/dav/calendars/ann/"
+
+    def test_wrong_namespace_finds_nothing(self, calendar):
+        assert calendar.caldav_href(_Resp(HOME_RESPONSE), "D:calendar-home-set") is None

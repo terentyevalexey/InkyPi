@@ -9,6 +9,7 @@ from io import BytesIO
 import logging
 from utils.http_client import get_http_session
 from collections import defaultdict
+from urllib.parse import urlsplit
 from datetime import datetime, date, timedelta
 from xml.etree import ElementTree
 import pytz
@@ -19,9 +20,28 @@ TIME_GRID_VIEWS = ("timeGridDay", "timeGridWeek", "timeGrid")
 # The all-day row is capped at two lines so it can never squeeze the time grid.
 ALL_DAY_MAX_LINES = 2
 
-CALDAV_NAMESPACES = {"D": "DAV:", "C": "urn:ietf:params:xml:ns:caldav"}
+CALDAV_NAMESPACES = {"D": "DAV:", "C": "urn:ietf:params:xml:ns:caldav",
+                     "A": "http://apple.com/ns/ical/"}
 
 # Asks a CalDAV collection for only the events overlapping the rendered window.
+# Discovery: a provider's "CalDAV address" is usually a server root, and the
+# calendars sit below it via current-user-principal -> calendar-home-set.
+CALDAV_PRINCIPAL_QUERY = """<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:"><D:prop><D:current-user-principal/></D:prop></D:propfind>
+"""
+
+CALDAV_HOME_QUERY = """<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop><C:calendar-home-set/></D:prop>
+</D:propfind>
+"""
+
+CALDAV_LIST_QUERY = """<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:" xmlns:A="http://apple.com/ns/ical/">
+  <D:prop><D:resourcetype/><D:displayname/><A:calendar-color/></D:prop>
+</D:propfind>
+"""
+
 CALDAV_QUERY = """<?xml version="1.0" encoding="utf-8" ?>
 <C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
   <D:prop><C:calendar-data/></D:prop>
@@ -361,6 +381,25 @@ class Calendar(BasePlugin):
             end = (dtstart + duration).isoformat()
         return start, end, all_day
 
+    def action_discover(self, data):
+        """
+        Expand a CalDAV server address into the calendars behind it, so the settings
+        form can offer them as separate rows to keep or drop.
+        """
+        url = (data.get("url") or "").strip()
+        if not url:
+            raise RuntimeError("A calendar URL is required")
+        if url.startswith("webcal://"):
+            url = url.replace("webcal://", "https://", 1)
+
+        username, password = data.get("username") or "", data.get("password") or ""
+        auth = (username, password) if username and password else None
+
+        calendars = self.discover_caldav_calendars(url, auth)
+        if not calendars:
+            raise RuntimeError(f"No calendars found under {url}")
+        return {"calendars": calendars}
+
     def get_calendar_sources(self, settings):
         """
         Zip the parallel form arrays into one record per calendar.
@@ -405,6 +444,12 @@ class Calendar(BasePlugin):
         if url.startswith("webcal://"):
             url = url.replace("webcal://", "https://", 1)
 
+        if source["auth"] and urlsplit(url).scheme != "https":
+            logger.warning(
+                "Sending calendar credentials in clear text to %s; use an https URL",
+                urlsplit(url).hostname or "the calendar host"
+            )
+
         if source["caldav"]:
             return self.fetch_caldav(url, source["auth"], tz, start_range, end_range)
 
@@ -417,24 +462,123 @@ class Calendar(BasePlugin):
 
     def fetch_caldav(self, url, auth, tz, start_range, end_range):
         """
-        Ask a CalDAV collection for just the window being rendered.
+        Ask CalDAV for just the window being rendered.
 
-        The ICS export of the same collection is the whole calendar — megabytes and
+        The ICS export of the same data is the whole calendar — megabytes and
         thousands of events — where a day view needs a handful of them.
+
+        The URL may be a single calendar, or the server address a provider hands out:
+        Nextcloud calls /remote.php/dav "the CalDAV address", but a calendar-query
+        against it answers 415 because it is not a calendar. So try the URL directly
+        first, and fall back to discovering the calendars underneath it.
         """
-        body = CALDAV_QUERY.format(
+        query = CALDAV_QUERY.format(
             start=self.caldav_timestamp(start_range, tz),
             end=self.caldav_timestamp(end_range, tz),
         )
+
+        direct = self.caldav_request("REPORT", url, auth, query, depth="1", required=False)
+        if direct is not None:
+            return self.merge_caldav_response(direct.content)
+
+        collections = self.discover_caldav_calendars(url, auth)
+        if not collections:
+            raise RuntimeError(
+                f"{url} is not a calendar and no calendars were found under it"
+            )
+
+        logger.info(
+            "Discovered %d calendars under %s: %s",
+            len(collections), url, ", ".join(c["name"] for c in collections)
+        )
+        bodies = [
+            self.caldav_request("REPORT", c["url"], auth, query, depth="1").content
+            for c in collections
+        ]
+        return self.merge_caldav_response(bodies)
+
+    def caldav_request(self, method, url, auth, body, depth="0", required=True):
+        """
+        One DAV request. With required=False a refusal returns None instead of raising,
+        which is how an unsuitable URL is told apart from an unreachable server.
+        """
         try:
             response = get_http_session().request(
-                "REPORT", url, data=body.encode("utf-8"), auth=auth, timeout=30,
-                headers={"Depth": "1", "Content-Type": 'application/xml; charset="utf-8"'},
+                method, url, data=body.encode("utf-8"), auth=auth, timeout=30,
+                headers={"Depth": depth, "Content-Type": "application/xml; charset=utf-8"},
             )
-            response.raise_for_status()
         except Exception as e:
-            raise RuntimeError(f"Failed to query CalDAV calendar: {str(e)}")
-        return self.merge_caldav_response(response.content)
+            raise RuntimeError(f"CalDAV {method} failed: {str(e)}")
+
+        if response.ok:
+            return response
+        if not required:
+            logger.debug("CalDAV %s on %s answered %s", method, url, response.status_code)
+            return None
+        raise RuntimeError(
+            f"CalDAV {method} on {url} failed: {response.status_code} {response.reason}"
+        )
+
+    def discover_caldav_calendars(self, url, auth):
+        """
+        Walk a CalDAV server address down to the calendars it holds, following
+        current-user-principal to calendar-home-set to the collections inside it.
+
+        Returns (display name, url) pairs.
+        """
+        parts = urlsplit(url)
+        origin = f"{parts.scheme}://{parts.netloc}"
+
+        principal = self.caldav_href(
+            self.caldav_request("PROPFIND", url, auth, CALDAV_PRINCIPAL_QUERY),
+            "D:current-user-principal")
+        if not principal:
+            return []
+
+        home = self.caldav_href(
+            self.caldav_request("PROPFIND", origin + principal, auth, CALDAV_HOME_QUERY),
+            "C:calendar-home-set")
+        if not home:
+            return []
+
+        listing = self.caldav_request(
+            "PROPFIND", origin + home, auth, CALDAV_LIST_QUERY, depth="1")
+        return self.caldav_collections(listing.content, origin, home)
+
+    def caldav_href(self, response, prop):
+        """
+        The href inside a named property. The prop is given with its prefix because
+        the two used here live in different namespaces: current-user-principal is
+        DAV, calendar-home-set is CalDAV.
+        """
+        node = self.parse_caldav_xml(response.content).find(
+            f".//{prop}/D:href", CALDAV_NAMESPACES)
+        return node.text.strip() if node is not None and node.text else None
+
+    def caldav_collections(self, xml_body, origin, home):
+        """
+        Calendar collections in a listing, skipping the home collection itself.
+
+        Returns dicts of name, url and the calendar's own colour where the server
+        publishes one, so discovered calendars arrive already distinguishable.
+        """
+        found = []
+        for response in self.parse_caldav_xml(xml_body).findall(
+                ".//D:response", CALDAV_NAMESPACES):
+            href_node = response.find("D:href", CALDAV_NAMESPACES)
+            if href_node is None or not href_node.text:
+                continue
+            href = href_node.text.strip()
+            if href.rstrip("/") == home.rstrip("/"):
+                continue
+            if response.find(".//D:resourcetype/C:calendar", CALDAV_NAMESPACES) is None:
+                continue
+            name_node = response.find(".//D:displayname", CALDAV_NAMESPACES)
+            name = name_node.text if name_node is not None and name_node.text else href
+            color_node = response.find(".//A:calendar-color", CALDAV_NAMESPACES)
+            color = self.parse_ics_color(color_node.text) if color_node is not None else None
+            found.append({"name": name, "url": origin + href, "color": color})
+        return found
 
     @staticmethod
     def caldav_timestamp(dt, tz):
@@ -443,38 +587,53 @@ class Calendar(BasePlugin):
             dt = tz.localize(dt)
         return dt.astimezone(pytz.utc).strftime("%Y%m%dT%H%M%SZ")
 
-    def merge_caldav_response(self, xml_body):
+    @staticmethod
+    def parse_caldav_xml(xml_body):
         """
-        Fold every calendar-data blob of a multistatus response into one calendar.
-
-        Each blob is a self-contained VCALENDAR for a single resource, so the
-        VTIMEZONE definitions repeat and have to be de-duplicated by TZID.
+        ElementTree expands internal entities, so a hostile or compromised server could
+        stall the device with a nested-entity bomb. A DAV response never carries a
+        doctype, so refusing one costs nothing.
         """
-        merged, timezones = None, set()
+        if b"<!DOCTYPE" in xml_body or b"<!ENTITY" in xml_body:
+            raise RuntimeError("CalDAV response declares XML entities; refusing to parse it")
         try:
-            root = ElementTree.fromstring(xml_body)
+            return ElementTree.fromstring(xml_body)
         except ElementTree.ParseError as e:
             raise RuntimeError(f"CalDAV server returned malformed XML: {str(e)}")
 
-        for node in root.findall(".//C:calendar-data", CALDAV_NAMESPACES):
-            if not (node.text or "").strip():
-                continue
-            try:
-                parsed = icalendar.Calendar.from_ical(node.text)
-            except ValueError:
-                logger.warning("Skipping unparsable CalDAV resource")
-                continue
-            if merged is None:
-                merged = icalendar.Calendar()
-                for key, value in parsed.items():
-                    merged[key] = value
-            for component in parsed.subcomponents:
-                if component.name == "VTIMEZONE":
-                    tzid = str(component.get("TZID"))
-                    if tzid in timezones:
-                        continue
-                    timezones.add(tzid)
-                merged.add_component(component)
+    def merge_caldav_response(self, xml_bodies):
+        """
+        Fold every calendar-data blob of one or more multistatus responses into a
+        single calendar.
+
+        Each blob is a self-contained VCALENDAR for one resource, so the VTIMEZONE
+        definitions repeat and have to be de-duplicated by TZID.
+        """
+        if isinstance(xml_bodies, (bytes, bytearray, str)):
+            xml_bodies = [xml_bodies]
+
+        merged, timezones = None, set()
+        for xml_body in xml_bodies:
+            root = self.parse_caldav_xml(xml_body)
+            for node in root.findall(".//C:calendar-data", CALDAV_NAMESPACES):
+                if not (node.text or "").strip():
+                    continue
+                try:
+                    parsed = icalendar.Calendar.from_ical(node.text)
+                except ValueError:
+                    logger.warning("Skipping unparsable CalDAV resource")
+                    continue
+                if merged is None:
+                    merged = icalendar.Calendar()
+                    for key, value in parsed.items():
+                        merged[key] = value
+                for component in parsed.subcomponents:
+                    if component.name == "VTIMEZONE":
+                        tzid = str(component.get("TZID"))
+                        if tzid in timezones:
+                            continue
+                        timezones.add(tzid)
+                    merged.add_component(component)
 
         return merged if merged is not None else icalendar.Calendar()
 

@@ -256,3 +256,27 @@ def update_now():
         return jsonify({"error": f"An error occurred: {str(e)}"}), 500
 
     return jsonify({"success": True, "message": "Display updated"}), 200
+
+@plugin_bp.route('/plugin_action/<string:plugin_id>/<string:action>', methods=['POST'])
+def plugin_action(plugin_id, action):
+    """
+    Run a settings-form helper on a plugin, such as expanding a CalDAV server
+    address into the calendars behind it.
+
+    A plugin opts in by defining action_<name>; anything else is a 404, so this
+    cannot be used to reach arbitrary attributes.
+    """
+    device_config = current_app.config['DEVICE_CONFIG']
+    plugin_config = device_config.get_plugin(plugin_id)
+    if not plugin_config:
+        return jsonify({"error": f"Plugin '{plugin_id}' not found"}), 404
+
+    handler = getattr(get_plugin_instance(plugin_config), f"action_{action}", None)
+    if not callable(handler):
+        return jsonify({"error": f"Plugin '{plugin_id}' has no action '{action}'"}), 404
+
+    try:
+        return jsonify(handler(request.get_json(silent=True) or {})), 200
+    except Exception as e:
+        logger.warning(f"Plugin action {plugin_id}/{action} failed: {e}")
+        return jsonify({"error": str(e)}), 400

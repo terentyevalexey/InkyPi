@@ -204,8 +204,9 @@
 
     // Every field here submits even when blank, which is what keeps the parallel
     // calendar arrays lined up with each other.
-    function addCalendarInput(calendar = {}) {
-        const { url = '', color = '#007BFF', username = '', password = '', kind = 'ics' } = calendar;
+    function addCalendarInput(calendar = {}, before = null) {
+        const { url = '', color = '#007BFF', username = '', password = '',
+                kind = 'ics', name = '' } = calendar;
         const calendarList = document.getElementById('calendarList');
 
         const wrapper = document.createElement('div');
@@ -234,7 +235,15 @@
         removeBtn.classList.add('remove-btn');
         removeBtn.onclick = () => wrapper.remove();
 
-        urlRow.append(colorInput, urlInput, removeBtn);
+        // Expands a server address into one row per calendar behind it.
+        const discoverBtn = document.createElement('button');
+        discoverBtn.type = 'button';
+        discoverBtn.innerText = 'Discover';
+        discoverBtn.classList.add('form-input', 'discover-btn');
+        discoverBtn.style.width = 'auto';
+        discoverBtn.onclick = () => discoverCalendars(wrapper);
+
+        urlRow.append(colorInput, urlInput, discoverBtn, removeBtn);
 
         const authRow = document.createElement('div');
         authRow.classList.add('form-group', 'nowrap');
@@ -249,6 +258,19 @@
             kindSelect.appendChild(option);
         }
         kindSelect.value = kind;
+        // Discovery only means anything against a CalDAV server.
+        const syncDiscoverVisibility = () => {
+            discoverBtn.style.display = kindSelect.value === 'caldav' ? '' : 'none';
+        };
+        kindSelect.onchange = syncDiscoverVisibility;
+        syncDiscoverVisibility();
+
+        const nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.name = 'calendarNames[]';
+        nameInput.placeholder = 'Name (optional)';
+        nameInput.classList.add('form-input');
+        nameInput.value = name;
 
         const userInput = document.createElement('input');
         userInput.type = 'text';
@@ -266,10 +288,58 @@
         passwordInput.classList.add('form-input');
         passwordInput.value = password;
 
-        authRow.append(kindSelect, userInput, passwordInput);
+        authRow.append(kindSelect, nameInput, userInput, passwordInput);
 
         wrapper.append(urlRow, authRow);
-        calendarList.appendChild(wrapper);
+        if (before) {
+            calendarList.insertBefore(wrapper, before);
+        } else {
+            calendarList.appendChild(wrapper);
+        }
+    }
+
+    // Replace one server-address row with a row per calendar it holds, so the
+    // unwanted ones can simply be removed.
+    async function discoverCalendars(wrapper) {
+        const field = selector => wrapper.querySelector(`[name="${selector}"]`);
+        const url = field('calendarURLs[]').value.trim();
+        if (!url) {
+            showResponseModal('failure', 'Enter the calendar URL first.');
+            return;
+        }
+
+        const button = wrapper.querySelector('.discover-btn');
+        const label = button.innerText;
+        button.innerText = 'Searching...';
+        button.disabled = true;
+
+        const username = field('calendarUsernames[]').value;
+        const password = field('calendarPasswords[]').value;
+
+        try {
+            const response = await fetch('/plugin_action/calendar/discover', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url, username, password })
+            });
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.error || 'Discovery failed');
+
+            payload.calendars.forEach(calendar => addCalendarInput({
+                url: calendar.url,
+                color: calendar.color || '#007BFF',
+                name: calendar.name,
+                username, password, kind: 'caldav'
+            }, wrapper));
+            wrapper.remove();
+            showResponseModal('success',
+                `Found ${payload.calendars.length} calendars. Remove the ones you do not want, then Save.`);
+        } catch (error) {
+            showResponseModal('failure', `Could not discover calendars: ${error.message}`);
+        } finally {
+            button.innerText = label;
+            button.disabled = false;
+        }
     }
 
     // populate form values from plugin settings
@@ -335,6 +405,7 @@
                 const usernames = pluginSettings["calendarUsernames[]"] || [];
                 const passwords = pluginSettings["calendarPasswords[]"] || [];
                 const kinds = pluginSettings["calendarTypes[]"] || [];
+                const names = pluginSettings["calendarNames[]"] || [];
 
                 // Instances saved before per-calendar logins existed carry a single
                 // shared credential. Show it on every row so it is visible, and can be
@@ -346,7 +417,8 @@
                     color: colors[i] || '#007BFF',
                     username: migrating ? (pluginSettings.loginUsername || '') : (usernames[i] || ''),
                     password: migrating ? (pluginSettings.loginPassword || '') : (passwords[i] || ''),
-                    kind: kinds[i] || 'ics'
+                    kind: kinds[i] || 'ics',
+                    name: names[i] || ''
                 }));
             }
         }

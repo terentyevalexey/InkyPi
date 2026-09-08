@@ -172,3 +172,14 @@ mock_display_output/
 # Static Files added by install/update_vendors.sh
 /src/static/scripts/
 /src/static/styles/
+
+# Runtime device config: holds the playlist and each calendar's credentials
+src/config/device.json
+
+# Fetched by install.sh, not part of the source tree
+src/display/waveshare_epd/*.py
+!src/display/waveshare_epd/__init__.py
+!src/display/waveshare_epd/epdconfig.py
+
+# Rendered output
+src/static/images/current_image.png
