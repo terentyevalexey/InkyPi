@@ -198,12 +198,21 @@ th {
   line-height: 1.1;
 }
 
-/* Week views keep the native vertical stack, but the row is still capped. */
+/* Week views keep the native vertical stack, but the row is still capped. The
+   truncation has to sit on the title itself: text-overflow on the event box does
+   nothing for text that overflows inside a child element. */
 .fc-timeGridWeek-view .fc-daygrid-event,
 .fc-timeGrid-view .fc-daygrid-event {
   margin-top: 0 !important;
   margin-bottom: 1px !important;
   padding: 0 2px;
+  overflow: hidden;
+}
+
+.fc-timeGridWeek-view .fc-daygrid-event .fc-event-title,
+.fc-timeGridWeek-view .fc-daygrid-event .fc-event-time,
+.fc-timeGrid-view .fc-daygrid-event .fc-event-title,
+.fc-timeGrid-view .fc-daygrid-event .fc-event-time {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -221,4 +230,18 @@ th {
    day column and leaves a grey stripe down the edge of the render. */
 .fc .fc-scroller {
   overflow: hidden !important;
+}
+
+/* Long event titles */
+
+/* A single unbroken word must wrap rather than run out past the event's edge.
+   The explicit line-height matters: it is what lets the clamp in calendar.html
+   count lines, since a computed "normal" is not a number it can divide by. */
+.fc .fc-event-title {
+  overflow-wrap: anywhere;
+  line-height: 1.15;
+}
+
+.fc .fc-event-main {
+  overflow: hidden;
 }

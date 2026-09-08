@@ -48,6 +48,59 @@
         return forms[index].replace('{n}', count);
     }
 
+    // In a one-hour box the time label takes a line of its own and leaves the title
+    // a single line before it has to truncate. FullCalendar's own compact style puts
+    // the two on one line, which hands that line back to the title; it only applies
+    // the style to much shorter events, so extend it to any box that cannot give the
+    // title two lines.
+    function compactCrowdedEvents() {
+        document.querySelectorAll('.fc-timegrid-event').forEach(event => {
+            if (event.classList.contains('fc-timegrid-event-short')) return;
+            const title = event.querySelector('.fc-event-title');
+            const time = event.querySelector('.fc-event-time');
+            if (!title || !time) return;
+
+            const range = document.createRange();
+            range.selectNodeContents(title);
+            const line = Array.from(range.getClientRects()).find(rect => rect.height > 0);
+            if (!line) return;
+
+            const available = event.clientHeight - time.getBoundingClientRect().height;
+            if (available < line.height * 2) {
+                event.classList.add('fc-timegrid-event-short');
+            }
+        });
+    }
+
+    // FullCalendar clips an overflowing title mid-word and can leave a half-height
+    // row of letters at the bottom of a box. Clamp each title to the lines that
+    // actually fit, which both ends it on an ellipsis and removes the sliced row.
+    //
+    // The line boxes are measured rather than derived from line-height: computed
+    // line-height is often the keyword "normal", and estimating it from the font
+    // size rounds down often enough to throw away a line that would have fitted.
+    function clampEventTitles() {
+        document.querySelectorAll('.fc-event-title').forEach(title => {
+            const box = title.closest('.fc-event');
+            if (!box) return;
+
+            const range = document.createRange();
+            range.selectNodeContents(title);
+            const lines = Array.from(range.getClientRects()).filter(rect => rect.height > 0);
+            if (lines.length < 2) return;          // one line: CSS ellipsis handles it
+
+            // A line counts as fitting only if its whole height is inside the box.
+            const limit = box.getBoundingClientRect().top + box.clientHeight;
+            const fitting = lines.filter(rect => rect.bottom <= limit + 0.5).length;
+            if (fitting >= lines.length) return;   // all of it fits already
+
+            title.style.display = '-webkit-box';
+            title.style.webkitBoxOrient = 'vertical';
+            title.style.webkitLineClamp = String(Math.max(1, fitting));
+            title.style.overflow = 'hidden';
+        });
+    }
+
     document.addEventListener('DOMContentLoaded', function () {
         const calendarEl = document.getElementById('calendar');
         const timeFormat = {
@@ -78,6 +131,10 @@
             displayEventTime: {{ (plugin_settings.displayEventTime == "true") | tojson}},
             weekends:  {{ (plugin_settings.displayWeekends == "true") | tojson}},
             nowIndicator: {{ show_now_indicator | tojson }},
+            {# Overlapping events sit side by side rather than stacked: the default
+               lets a later event cover an earlier one, hiding its title mid-word with
+               no way for the reader to uncover it on a static panel. #}
+            slotEventOverlap: false,
             fixedWeekCount: false,
             {# The row is dropped outright when nothing is in it, so an empty "all-day"
                label can never steal height from the time grid. #}
@@ -110,6 +167,11 @@
             slotDuration: "01:00:00"
         });
         calendar.render();
+        // Two frames so the grid has finished sizing before titles are measured.
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            compactCrowdedEvents();
+            clampEventTitles();
+        }));
     });
 </script>
 
