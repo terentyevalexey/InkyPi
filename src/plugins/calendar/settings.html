@@ -1,19 +1,32 @@
+<style>
+  .calendar-entry {
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid rgba(128, 128, 128, 0.25);
+  }
+  .calendar-entry .form-group { margin-bottom: 4px; }
+  .form-hint {
+    display: block;
+    font-size: 0.8rem;
+    opacity: 0.7;
+    margin-top: 2px;
+  }
+</style>
+
 <div>
   <label class="form-label">Calendars:</label>
   <div id="calendarList"></div>
-  <button type="button" id="addCalendarBtn" class="form-input collapsible" onclick="addCalendarInput('', '#007BFF')">Add Calendar</button>
+  <button type="button" id="addCalendarBtn" class="form-input collapsible" onclick="addCalendarInput()">Add Calendar</button>
+  <span class="form-hint">Credentials are sent only to their own calendar's URL. Pick CalDAV
+    for a collection URL to fetch just the dates on screen instead of the whole calendar.</span>
 </div>
 
 <div class="form-group">
-    <label class="form-label">Login Information (Optional):</label>
-    <div class="form-group nowrap" style="margin-bottom: 5px;">
-        <input type="text" id="loginUsername" name="loginUsername" class="form-input" placeholder="Username">
-        <input type="password" id="loginPassword" name="loginPassword" class="form-input" placeholder="Password">
-    </div>
     <div class="form-group">
         <input type="checkbox" id="useAttendeeColor" name="useAttendeeColor" value="false" onclick="this.value=this.checked ? 'true' : 'false';">
         <span>Use Attendee Color:</span>
         <input type="color" id="attendeeColor" name="attendeeColor" class="color-picker" value="#00FF00">
+        <span class="form-hint">Highlights events you attend, matched against each calendar's own username.</span>
     </div>
 </div>
 
@@ -100,8 +113,19 @@
     </div>
 
     <div class="form-group nowrap" data-visible-modes="dayGrid">
-        <label for="interval">Display Weeks:</label>
-        <input type="number" id="displayWeeks" name="displayWeeks" class="form-input" min="1" max="52" placeholder="4">
+        <label for="displayPastWeeks">Weeks Shown:</label>
+        <input type="number" id="displayPastWeeks" name="displayPastWeeks" class="form-input" min="0" max="52" placeholder="1">
+        past +
+        <input type="number" id="displayWeeks" name="displayWeeks" class="form-input" min="0" max="52" placeholder="3">
+        ahead
+        <span class="form-hint">Rows before and after the current week, which is always shown.</span>
+    </div>
+
+    <div class="form-group nowrap">
+        <label for="dayOffset">Day Offset:</label>
+        <input type="number" id="dayOffset" name="dayOffset" class="form-input" min="-365" max="365" placeholder="0">
+        <span class="form-hint">Days to shift the view. Use 1 to show tomorrow at the end of
+          today; the now indicator is hidden whenever this is not zero.</span>
     </div>
 
     <div class="form-group nowrap">
@@ -178,12 +202,17 @@
         });
     }
 
-    function addCalendarInput(url = '', color = '#007BFF') {
+    // Every field here submits even when blank, which is what keeps the parallel
+    // calendar arrays lined up with each other.
+    function addCalendarInput(calendar = {}) {
+        const { url = '', color = '#007BFF', username = '', password = '', kind = 'ics' } = calendar;
         const calendarList = document.getElementById('calendarList');
 
         const wrapper = document.createElement('div');
         wrapper.classList.add('calendar-entry');
-        wrapper.classList.add('form-group');
+
+        const urlRow = document.createElement('div');
+        urlRow.classList.add('form-group', 'nowrap');
 
         const colorInput = document.createElement('input');
         colorInput.type = 'color';
@@ -205,10 +234,41 @@
         removeBtn.classList.add('remove-btn');
         removeBtn.onclick = () => wrapper.remove();
 
-        wrapper.appendChild(colorInput);
-        wrapper.appendChild(urlInput);
-        wrapper.appendChild(removeBtn);
+        urlRow.append(colorInput, urlInput, removeBtn);
 
+        const authRow = document.createElement('div');
+        authRow.classList.add('form-group', 'nowrap');
+
+        const kindSelect = document.createElement('select');
+        kindSelect.name = 'calendarTypes[]';
+        kindSelect.classList.add('form-input');
+        for (const [value, text] of [['ics', 'iCal'], ['caldav', 'CalDAV']]) {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = text;
+            kindSelect.appendChild(option);
+        }
+        kindSelect.value = kind;
+
+        const userInput = document.createElement('input');
+        userInput.type = 'text';
+        userInput.name = 'calendarUsernames[]';
+        userInput.placeholder = 'Username (optional)';
+        userInput.autocomplete = 'off';
+        userInput.classList.add('form-input');
+        userInput.value = username;
+
+        const passwordInput = document.createElement('input');
+        passwordInput.type = 'password';
+        passwordInput.name = 'calendarPasswords[]';
+        passwordInput.placeholder = 'Password (optional)';
+        passwordInput.autocomplete = 'new-password';
+        passwordInput.classList.add('form-input');
+        passwordInput.value = password;
+
+        authRow.append(kindSelect, userInput, passwordInput);
+
+        wrapper.append(urlRow, authRow);
         calendarList.appendChild(wrapper);
     }
 
@@ -220,7 +280,7 @@
         // defaults
         let viewMode = "dayGridMonth";
         let language = "en";
-        let calendars = [{ url: '', color: '#007BFF' }];
+        let calendars = [{}];
         let fontSize = "normal";
         let indicatorInterval = "60"; // Default interval
 
@@ -263,17 +323,30 @@
             document.getElementById('useIcsColors').checked = pluginSettings.useIcsColors === 'true';
             document.getElementById('useIcsColors').value = pluginSettings.useIcsColors || 'false';
 
-            // Populate Login Info
-            document.getElementById('loginUsername').value = pluginSettings.loginUsername || '';
-            document.getElementById('loginPassword').value = pluginSettings.loginPassword || '';
             document.getElementById('attendeeColor').value = pluginSettings.attendeeColor;
             document.getElementById('useAttendeeColor').checked = pluginSettings.useAttendeeColor;
             document.getElementById('useAttendeeColor').value = pluginSettings.useAttendeeColor;
             
+            document.getElementById('dayOffset').value = pluginSettings.dayOffset || '';
+            document.getElementById('displayPastWeeks').value = pluginSettings.displayPastWeeks || '';
+
             if (pluginSettings["calendarURLs[]"]) {
+                const colors = pluginSettings["calendarColors[]"] || [];
+                const usernames = pluginSettings["calendarUsernames[]"] || [];
+                const passwords = pluginSettings["calendarPasswords[]"] || [];
+                const kinds = pluginSettings["calendarTypes[]"] || [];
+
+                // Instances saved before per-calendar logins existed carry a single
+                // shared credential. Show it on every row so it is visible, and can be
+                // cleared from the calendars it does not belong to, before the next save.
+                const migrating = !usernames.some(name => name);
+
                 calendars = pluginSettings["calendarURLs[]"].map((url, i) => ({
                     url: url || '',
-                    color: pluginSettings["calendarColors[]"][i]  || '#007BFF'
+                    color: colors[i] || '#007BFF',
+                    username: migrating ? (pluginSettings.loginUsername || '') : (usernames[i] || ''),
+                    password: migrating ? (pluginSettings.loginPassword || '') : (passwords[i] || ''),
+                    kind: kinds[i] || 'ics'
                 }));
             }
         }
@@ -293,9 +366,7 @@
         document.getElementById('fontSize').value = fontSize;
 
         // populate calendars
-        calendars.forEach(({ url, color }) => {
-            addCalendarInput(url, color);
-        });
+        calendars.forEach(calendar => addCalendarInput(calendar));
 
         updateViewDependentOptions(viewMode)
     });

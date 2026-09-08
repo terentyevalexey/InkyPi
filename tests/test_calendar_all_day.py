@@ -1,5 +1,6 @@
 import os
 import sys
+from datetime import datetime
 
 import pytest
 
@@ -47,7 +48,7 @@ class TestAllDayLayout:
     )
     def test_row_is_capped_at_two_lines(self, calendar, count, lines, visible, overflow):
         events = [all_day(f"e{i}") for i in range(count)]
-        kept, actual_lines = calendar.layout_all_day_events(events, {})
+        kept, actual_lines, _ = calendar.layout_all_day_events(events, {})
 
         chips = [e for e in kept if e.get("overflowCount")]
         shown = [e for e in kept if e["allDay"] and not e.get("overflowCount")]
@@ -60,24 +61,44 @@ class TestAllDayLayout:
 
     def test_timed_events_are_never_dropped(self, calendar):
         events = [all_day(f"e{i}") for i in range(20)] + [timed()]
-        kept, _ = calendar.layout_all_day_events(events, {})
+        kept, _, _ = calendar.layout_all_day_events(events, {})
         assert sum(1 for e in kept if not e["allDay"]) == 1
 
     def test_multi_day_event_survives_a_crowded_day(self, calendar):
         trip = all_day("trip", DAY, "2026-09-11")
         events = [trip] + [all_day(f"e{i}") for i in range(15)]
-        kept, _ = calendar.layout_all_day_events(events, {})
+        kept, _, _ = calendar.layout_all_day_events(events, {})
         assert any(e["title"] == "trip" for e in kept)
 
     def test_week_views_stack_one_event_per_line(self, calendar):
         # A week gives each day its own narrow column, so five events cannot sit
         # side by side the way they do in the single-column day view.
         events = [all_day(f"e{i}") for i in range(5)]
-        kept, lines = calendar.layout_all_day_events(events, {}, "timeGridWeek")
+        kept, lines, _ = calendar.layout_all_day_events(events, {}, "timeGridWeek")
         shown = [e for e in kept if not e.get("overflowCount")]
         chips = [e for e in kept if e.get("overflowCount")]
         assert (lines, len(shown)) == (2, 1)
         assert chips[0]["overflowCount"] == 4
+
+    @pytest.mark.parametrize(
+        "count,lines,columns",
+        [
+            (1, 1, 1),    # a lone event spans the row, like a lone timed event
+            (2, 1, 2),
+            (5, 1, 5),
+            (6, 2, 3),    # balanced across two lines rather than 5 + 1
+            (7, 2, 4),    # 4 + 3
+            (10, 2, 5),
+            (11, 2, 5),   # 9 events plus the chip still fills 5 + 5
+        ],
+    )
+    def test_columns_follow_the_events_actually_present(self, calendar, count, lines, columns):
+        events = [all_day(f"e{i}") for i in range(count)]
+        _, actual_lines, actual_columns = calendar.layout_all_day_events(events, {})
+        assert (actual_lines, actual_columns) == (lines, columns)
+
+    def test_no_all_day_events_needs_no_columns(self, calendar):
+        assert calendar.layout_all_day_events([timed()], {}) == ([timed()], 0, 1)
 
     @pytest.mark.parametrize("value,expected", [("3", 3), ("", 5), (None, 5), ("abc", 5), ("0", 1)])
     def test_per_line_setting_is_tolerant_of_junk(self, calendar, value, expected):
@@ -110,3 +131,155 @@ class TestIcsColors:
     )
     def test_parse_ics_color(self, calendar, value, expected):
         assert calendar.parse_ics_color(value) == expected
+
+
+def ics_resource(uid, tzid="Europe/Moscow"):
+    return f"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//EN
+BEGIN:VTIMEZONE
+TZID:{tzid}
+BEGIN:STANDARD
+DTSTART:19700101T000000
+TZOFFSETFROM:+0300
+TZOFFSETTO:+0300
+TZNAME:MSK
+END:STANDARD
+END:VTIMEZONE
+BEGIN:VEVENT
+UID:{uid}
+DTSTAMP:20260908T090000Z
+DTSTART;TZID={tzid}:20260908T100000
+DTEND;TZID={tzid}:20260908T110000
+SUMMARY:{uid}
+END:VEVENT
+END:VCALENDAR"""
+
+
+def multistatus(*resources):
+    blobs = "".join(
+        f"<D:response><D:propstat><D:prop>"
+        f"<C:calendar-data>{r}</C:calendar-data>"
+        f"</D:prop></D:propstat></D:response>"
+        for r in resources
+    )
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">'
+        f"{blobs}</D:multistatus>"
+    ).encode("utf-8")
+
+
+class TestCalendarSources:
+
+    def test_each_calendar_keeps_its_own_credentials(self, calendar):
+        sources = calendar.get_calendar_sources({
+            "calendarURLs[]": ["https://a.example/cal", "https://b.example/cal"],
+            "calendarColors[]": ["#111111", "#222222"],
+            "calendarUsernames[]": ["ann", ""],
+            "calendarPasswords[]": ["secret", ""],
+            "calendarTypes[]": ["caldav", "ics"],
+        })
+        assert [s["auth"] for s in sources] == [("ann", "secret"), None]
+        assert [s["caldav"] for s in sources] == [True, False]
+        assert [s["color"] for s in sources] == ["#111111", "#222222"]
+
+    def test_a_password_is_not_shared_with_other_hosts(self, calendar):
+        # The regression this guards: one login broadcast to every calendar.
+        sources = calendar.get_calendar_sources({
+            "calendarURLs[]": ["https://mine.example/cal", "https://theirs.example/cal"],
+            "calendarUsernames[]": ["ann", ""],
+            "calendarPasswords[]": ["secret", ""],
+        })
+        assert sources[1]["auth"] is None
+
+    def test_legacy_shared_login_still_works(self, calendar):
+        # Instances saved before per-calendar credentials must keep fetching.
+        sources = calendar.get_calendar_sources({
+            "calendarURLs[]": ["https://a.example/cal", "https://b.example/cal"],
+            "loginUsername": "ann",
+            "loginPassword": "secret",
+        })
+        assert [s["auth"] for s in sources] == [("ann", "secret")] * 2
+
+    def test_short_arrays_do_not_misalign(self, calendar):
+        sources = calendar.get_calendar_sources({
+            "calendarURLs[]": ["https://a.example/cal", "https://b.example/cal"],
+            "calendarColors[]": ["#111111"],
+        })
+        assert len(sources) == 2
+        assert sources[1]["color"] == "#007BFF"
+
+
+class TestCaldav:
+
+    def test_timestamps_are_utc_basic_format(self, calendar):
+        import pytz
+        tz = pytz.timezone("Europe/Moscow")
+        naive = datetime(2026, 9, 8, 0, 0)
+        assert calendar.caldav_timestamp(naive, tz) == "20260907T210000Z"
+
+    def test_resources_merge_into_one_calendar(self, calendar):
+        merged = calendar.merge_caldav_response(
+            multistatus(ics_resource("a"), ics_resource("b"))
+        )
+        events = [c for c in merged.subcomponents if c.name == "VEVENT"]
+        timezones = [c for c in merged.subcomponents if c.name == "VTIMEZONE"]
+        assert len(events) == 2
+        # Both resources carry the same VTIMEZONE; it must not be duplicated.
+        assert len(timezones) == 1
+
+    def test_distinct_timezones_are_both_kept(self, calendar):
+        merged = calendar.merge_caldav_response(
+            multistatus(ics_resource("a", "Europe/Moscow"), ics_resource("b", "UTC"))
+        )
+        assert len([c for c in merged.subcomponents if c.name == "VTIMEZONE"]) == 2
+
+    def test_empty_response_yields_an_empty_calendar(self, calendar):
+        merged = calendar.merge_caldav_response(multistatus())
+        assert [c for c in merged.subcomponents if c.name == "VEVENT"] == []
+
+    def test_malformed_xml_is_reported_clearly(self, calendar):
+        with pytest.raises(RuntimeError, match="malformed XML"):
+            calendar.merge_caldav_response(b"<D:multistatus")
+
+
+class TestViewRange:
+
+    def test_day_view_follows_the_offset_date(self, calendar):
+        # The offset is applied by the caller, so the range simply tracks view_dt.
+        start, end, initial = calendar.get_view_range(
+            "timeGridDay", datetime(2026, 9, 9), {})
+        assert (start, end) == (datetime(2026, 9, 9), datetime(2026, 9, 10))
+        assert initial.isoformat() == "2026-09-09"
+
+    @pytest.mark.parametrize("week_start_day,expected", [("1", "2026-09-07"), ("0", "2026-09-06")])
+    def test_week_start_honours_the_first_day_setting(self, calendar, week_start_day, expected):
+        # 2026-09-08 is a Tuesday.
+        start = calendar.get_week_start(datetime(2026, 9, 8), {"weekStartDay": week_start_day})
+        assert start.date().isoformat() == expected
+
+    def test_multi_week_grid_spans_past_present_and_future(self, calendar):
+        settings = {"weekStartDay": "1", "displayPastWeeks": "1", "displayWeeks": "4"}
+        start, end, initial = calendar.get_view_range("dayGrid", datetime(2026, 9, 8), settings)
+        assert start == datetime(2026, 8, 31)          # one week before the current week
+        assert (end - start).days == 6 * 7             # 1 past + current + 4 ahead
+        assert initial == start.date()
+        assert calendar.get_day_grid_weeks(settings) == 6
+
+    def test_multi_week_grid_can_drop_the_past_row(self, calendar):
+        settings = {"weekStartDay": "1", "displayPastWeeks": "0", "displayWeeks": "2"}
+        start, _, _ = calendar.get_view_range("dayGrid", datetime(2026, 9, 8), settings)
+        assert start == datetime(2026, 9, 7)           # the current week itself
+        assert calendar.get_day_grid_weeks(settings) == 3
+
+    def test_default_span_is_one_past_week_and_three_ahead(self, calendar):
+        # Five rows keeps the cells big enough to read on a 7.3" panel.
+        assert calendar.get_day_grid_span({}) == (1, 3)
+        assert calendar.get_day_grid_weeks({}) == 5
+
+    def test_fetch_window_matches_the_rendered_span(self, calendar):
+        # A mismatch here silently drops events off the edge of the grid.
+        settings = {"weekStartDay": "1", "displayPastWeeks": "2", "displayWeeks": "3"}
+        start, end, _ = calendar.get_view_range("dayGrid", datetime(2026, 9, 8), settings)
+        assert (end - start).days == calendar.get_day_grid_weeks(settings) * 7

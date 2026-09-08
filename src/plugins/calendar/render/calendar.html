@@ -62,6 +62,9 @@
             initialView: '{{ view }}',
             events: events,
             now: '{{ current_dt }}',
+            {# initialDate is separate from now, so a day offset can render tomorrow
+               (or last week) while "now" stays the real clock time. #}
+            initialDate: '{{ initial_date }}',
             timeZone: '{{ timezone }}',
             contentHeight: '100%',
             slotDuration: '01:00:00',
@@ -74,7 +77,7 @@
             eventTimeFormat: timeFormat,
             displayEventTime: {{ (plugin_settings.displayEventTime == "true") | tojson}},
             weekends:  {{ (plugin_settings.displayWeekends == "true") | tojson}},
-            nowIndicator: {{ (plugin_settings.displayNowIndicator == "true") | tojson}},
+            nowIndicator: {{ show_now_indicator | tojson }},
             fixedWeekCount: false,
             {# The row is dropped outright when nothing is in it, so an empty "all-day"
                label can never steal height from the time grid. #}
@@ -98,7 +101,7 @@
                 return (a.title || '').localeCompare(b.title || '');
             },
             {% if view == 'timeGrid' %}duration: {days : 7 },{% endif %}
-            {% if view == 'dayGrid' %}duration: {weeks : "{{ plugin_settings.displayWeeks or 4}}" },{% endif %}
+            {% if view == 'dayGrid' %}duration: {weeks : {{ day_grid_weeks }} },{% endif %}
             headerToolbar: {
                 left: '',
                 center: "{{ 'title' if plugin_settings.displayTitle == 'true' else '' }}",
