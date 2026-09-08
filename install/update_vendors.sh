@@ -14,6 +14,9 @@ declare -a VENDORS=(
   "jQuery|https://code.jquery.com/jquery-${JQUERY_VERSION}.min.js|src/static/scripts/jquery.min.js"
   "Chart JS|https://cdn.jsdelivr.net/npm/chart.js|src/static/scripts/chart.js"
   "Fullcalendar JS|https://cdn.jsdelivr.net/npm/fullcalendar@${FULLCALENDAR_VERSION}/index.global.min.js|src/static/scripts/calendar.min.js"
+  # The main bundle ships the English locale only, so date names come from Intl but
+  # UI strings such as "all-day" stay untranslated without this second file.
+  "Fullcalendar locales|https://cdn.jsdelivr.net/npm/@fullcalendar/core@${FULLCALENDAR_VERSION}/locales-all.global.min.js|src/static/scripts/calendar.locales.min.js"
 )
 
 # Download each vendor file

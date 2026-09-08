@@ -118,6 +118,33 @@
     </div>
 </div>
 
+<div class="form-group">
+    <label class="form-label">All-Day Events:</label>
+
+    <div class="form-group nowrap" data-visible-modes="timeGridDay,timeGridWeek">
+        <label for="allDayMaxPerLine">Per Line:</label>
+        <input type="number" id="allDayMaxPerLine" name="allDayMaxPerLine" class="form-input" min="1" max="20" placeholder="5">
+        <span class="form-hint">Row grows to a second line past this, then shows a "+N" chip.</span>
+    </div>
+
+    <div class="form-group">
+        <input type="checkbox" id="useIcsColors" name="useIcsColors" value="false" onclick="this.value=this.checked ? 'true' : 'false';">
+        <span>Use Colors From Calendar</span>
+    </div>
+
+    <div class="form-group">
+        <input type="checkbox" id="useAllDayColor" name="useAllDayColor" value="false" onclick="this.value=this.checked ? 'true' : 'false';">
+        <span>All-Day Color:</span>
+        <input type="color" id="allDayColor" name="allDayColor" class="color-picker" value="#808080">
+    </div>
+
+    <div class="form-group nowrap" data-visible-modes="timeGridDay,timeGridWeek">
+        <label for="allDayOverflowLabel">Overflow Label:</label>
+        <input type="text" id="allDayOverflowLabel" name="allDayOverflowLabel" class="form-input" placeholder="+{n}">
+        <input type="color" id="allDayOverflowColor" name="allDayOverflowColor" class="color-picker" value="#808080">
+    </div>
+</div>
+
 <script>
     function selectView(button) {
       // Remove 'active' from all buttons
@@ -225,6 +252,16 @@
             document.getElementById("endTimeInterval").value = pluginSettings.endTimeInterval;
 
             document.getElementById("displayWeeks").value = pluginSettings.displayWeeks;
+
+            // All-day event layout and colors
+            document.getElementById('allDayMaxPerLine').value = pluginSettings.allDayMaxPerLine || '';
+            document.getElementById('allDayOverflowLabel').value = pluginSettings.allDayOverflowLabel || '';
+            document.getElementById('allDayOverflowColor').value = pluginSettings.allDayOverflowColor || '#808080';
+            document.getElementById('allDayColor').value = pluginSettings.allDayColor || '#808080';
+            document.getElementById('useAllDayColor').checked = pluginSettings.useAllDayColor === 'true';
+            document.getElementById('useAllDayColor').value = pluginSettings.useAllDayColor || 'false';
+            document.getElementById('useIcsColors').checked = pluginSettings.useIcsColors === 'true';
+            document.getElementById('useIcsColors').value = pluginSettings.useIcsColors || 'false';
 
             // Populate Login Info
             document.getElementById('loginUsername').value = pluginSettings.loginUsername || '';

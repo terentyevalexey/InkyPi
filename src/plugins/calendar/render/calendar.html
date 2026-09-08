@@ -3,6 +3,7 @@
 {% block content %}
 
 <script src="{{static_dir}}/scripts/calendar.min.js" charset="UTF-8"></script>
+<script src="{{static_dir}}/scripts/calendar.locales.min.js" charset="UTF-8"></script>
 
 <div id="calendar" class="calendar" style="
 --fc-page-bg-color: {{ plugin_settings.backgroundColor or white }};
@@ -14,12 +15,38 @@
 --fc-small-font-size: {{ 0.85 * font_scale }}em;
 --fc-title-font-size: {{ 1.75 * font_scale }}em;
 --fc-table-font-size: {{ 1 * font_scale }}em;
+
+--all-day-per-line: {{ all_day_per_line }};
+--all-day-lines: {{ all_day_lines }};
+--all-day-gap: 2px;
+--all-day-line-height: {{ (1.7 if all_day_lines == 1 else 1.05) * font_scale }}em;
 ">
 
 </div>
 
 <script>
     const events = {{ events | tojson }};
+    const locale = "{{ plugin_settings.language or 'en' }}";
+
+    // Plural forms are supplied in CLDR order (one|few|many|other) and clamped to
+    // however many the author wrote, so "+{n} event|+{n} events" works for English
+    // and "+{n} событие|+{n} события|+{n} событий" works for Russian.
+    const OVERFLOW_FORMS = {{ (plugin_settings.allDayOverflowLabel or '') | tojson }};
+    const CLDR_ORDER = ['one', 'few', 'many', 'other'];
+
+    function overflowLabel(count) {
+        const forms = OVERFLOW_FORMS.split('|').filter(f => f.length);
+        if (!forms.length) return '+' + count;
+        let index = forms.length - 1;
+        try {
+            const category = new Intl.PluralRules(locale).select(count);
+            const position = CLDR_ORDER.indexOf(category);
+            if (position >= 0) index = Math.min(position, forms.length - 1);
+        } catch (e) {
+            // Unknown locale: fall back to the last form.
+        }
+        return forms[index].replace('{n}', count);
+    }
 
     document.addEventListener('DOMContentLoaded', function () {
         const calendarEl = document.getElementById('calendar');
@@ -39,7 +66,7 @@
             contentHeight: '100%',
             slotDuration: '01:00:00',
             expandRows: true,
-            locale: "{{ plugin_settings.language or 'en' }}",
+            locale: locale,
             firstDay: "{{ plugin_settings.weekStartDay or 0}}",
             slotLabelFormat: timeFormat,
             slotMinTime: "{{ plugin_settings.startTimeInterval or 00}}:00:00",
@@ -49,6 +76,27 @@
             weekends:  {{ (plugin_settings.displayWeekends == "true") | tojson}},
             nowIndicator: {{ (plugin_settings.displayNowIndicator == "true") | tojson}},
             fixedWeekCount: false,
+            {# The row is dropped outright when nothing is in it, so an empty "all-day"
+               label can never steal height from the time grid. #}
+            allDaySlot: {{ (all_day_lines > 0) | tojson }},
+            {# Rewriting the chip after mount keeps FullCalendar's own rendering
+               intact for every real event. #}
+            eventDidMount: function (arg) {
+                const count = arg.event.extendedProps.overflowCount;
+                if (!count) return;
+                arg.el.innerHTML = '';
+                const label = document.createElement('div');
+                label.className = 'fc-all-day-overflow';
+                label.textContent = overflowLabel(count);
+                arg.el.appendChild(label);
+            },
+            eventOrder: function (a, b) {
+                // The overflow chip always trails the events it stands in for.
+                const chip = (a.overflowCount ? 1 : 0) - (b.overflowCount ? 1 : 0);
+                if (chip) return chip;
+                if (a.start && b.start && a.start - b.start) return a.start - b.start;
+                return (a.title || '').localeCompare(b.title || '');
+            },
             {% if view == 'timeGrid' %}duration: {days : 7 },{% endif %}
             {% if view == 'dayGrid' %}duration: {weeks : "{{ plugin_settings.displayWeeks or 4}}" },{% endif %}
             headerToolbar: {

@@ -8,8 +8,15 @@ import recurring_ical_events
 from io import BytesIO
 import logging
 import requests
-from datetime import datetime, timedelta
+from collections import defaultdict
+from datetime import datetime, date, timedelta
 import pytz
+
+# Views that render a separate all-day row above a time grid.
+TIME_GRID_VIEWS = ("timeGridDay", "timeGridWeek", "timeGrid")
+
+# The all-day row is capped at two lines so it can never squeeze the time grid.
+ALL_DAY_MAX_LINES = 2
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +70,10 @@ class Calendar(BasePlugin):
         if view == 'timeGridWeek' and settings.get("displayPreviousDays") != "true":
             view = 'timeGrid'
 
+        all_day_lines, all_day_per_line = 0, self.get_all_day_per_line(settings, view)
+        if view in TIME_GRID_VIEWS:
+            events, all_day_lines = self.layout_all_day_events(events, settings, view)
+
         template_params = {
             "view": view,
             "events": events,
@@ -70,7 +81,9 @@ class Calendar(BasePlugin):
             "timezone": timezone,
             "plugin_settings": settings,
             "time_format": time_format,
-            "font_scale": FONT_SIZES.get(settings.get("fontSize", "normal"), 1.0)
+            "font_scale": FONT_SIZES.get(settings.get("fontSize", "normal"), 1.0),
+            "all_day_lines": all_day_lines,
+            "all_day_per_line": all_day_per_line
         }
 
         image = self.render_image(dimensions, "calendar.html", "calendar.css", template_params)
@@ -88,10 +101,17 @@ class Calendar(BasePlugin):
         attendance_color = settings.get('attendeeColor', '#00FF00')
         contrast_attendance_color = self.get_contrast_color(attendance_color)
 
+        # Colors defined by the calendar itself, opt-in via toggles.
+        use_ics_colors = settings.get('useIcsColors') == 'true'
+        all_day_color = settings.get('allDayColor') if settings.get('useAllDayColor') == 'true' else None
+
         for calendar_url, color in zip(calendar_urls, colors):
             cal = self.fetch_calendar(calendar_url, settings)
             events = recurring_ical_events.of(cal).between(start_range, end_range)
             contrast_color = self.get_contrast_color(color)
+            calendar_color = None
+            if use_ics_colors:
+                calendar_color = self.parse_ics_color(cal.get('X-APPLE-CALENDAR-COLOR') or cal.get('COLOR'))
 
             for event in events:
                 start, end, all_day = self.parse_data_points(event, tz)
@@ -109,8 +129,16 @@ class Calendar(BasePlugin):
                         attendees = [attendees]
                     is_attending = any(attendee_username in str(a).lower() for a in attendees)
 
-                current_bg = attendance_color if is_attending else color
-                current_text = contrast_attendance_color if is_attending else contrast_color
+                base_color, base_text = color, contrast_color
+                if use_ics_colors:
+                    ics_color = self.parse_ics_color(event.get('COLOR')) or calendar_color
+                    if ics_color:
+                        base_color, base_text = ics_color, self.get_contrast_color(ics_color)
+                elif all_day and all_day_color:
+                    base_color, base_text = all_day_color, self.get_contrast_color(all_day_color)
+
+                current_bg = attendance_color if is_attending else base_color
+                current_text = contrast_attendance_color if is_attending else base_text
 
                 parsed_event = {
                     "title": str(event.get("summary")),
@@ -126,6 +154,85 @@ class Calendar(BasePlugin):
 
         return parsed_events
     
+    def get_all_day_per_line(self, settings, view=None):
+        """
+        How many all-day events fit on one line of the row. Week views give each day
+        its own narrow column, so events there stack one per line no matter what the
+        setting says; only the single-column day view can pack them side by side.
+        """
+        if view in ("timeGridWeek", "timeGrid"):
+            return 1
+        try:
+            return max(1, int(settings.get("allDayMaxPerLine") or 5))
+        except (TypeError, ValueError):
+            return 5
+
+    @staticmethod
+    def all_day_span(event):
+        """Every date an all-day event covers. DTEND is exclusive, per RFC 5545."""
+        start = date.fromisoformat(event["start"][:10])
+        end = date.fromisoformat(event["end"][:10]) if event.get("end") else start + timedelta(days=1)
+        if end <= start:
+            end = start + timedelta(days=1)
+        days, day = [], start
+        while day < end:
+            days.append(day)
+            day += timedelta(days=1)
+        return days
+
+    def layout_all_day_events(self, events, settings, view=None):
+        """
+        Cap the all-day row at two lines so it can never squeeze the time grid.
+
+        Returns the events to render plus the number of lines the row needs: 0 drops
+        the row entirely, 1 packs everything onto a single line, 2 splits it. Anything
+        that still does not fit is replaced by one "+N" chip on the day that overflowed.
+        """
+        all_day = [e for e in events if e["allDay"]]
+        if not all_day:
+            return events, 0
+
+        per_line = self.get_all_day_per_line(settings, view)
+        ordered = sorted(all_day, key=lambda e: (e["start"], e.get("end") or "", e["title"]))
+
+        by_day = defaultdict(list)
+        for event in ordered:
+            for day in self.all_day_span(event):
+                by_day[day].append(event)
+
+        busiest = max(len(day_events) for day_events in by_day.values())
+        lines = 1 if busiest <= per_line else ALL_DAY_MAX_LINES
+        capacity = lines * per_line
+        if busiest <= capacity:
+            return events, lines
+
+        # An event survives if it fits on at least one day it covers, so a multi-day
+        # event is never chopped in half by a single crowded day.
+        visible = set()
+        for day_events in by_day.values():
+            fitting = day_events[:capacity - 1] if len(day_events) > capacity else day_events
+            visible.update(id(event) for event in fitting)
+
+        kept = [e for e in events if not e["allDay"] or id(e) in visible]
+        for day, day_events in sorted(by_day.items()):
+            hidden = sum(1 for e in day_events if id(e) not in visible)
+            if hidden:
+                kept.append(self.overflow_chip(day, hidden, settings))
+        return kept, lines
+
+    def overflow_chip(self, day, count, settings):
+        """A synthetic all-day event standing in for the events that did not fit."""
+        color = settings.get("allDayOverflowColor") or "#808080"
+        return {
+            "title": f"+{count}",
+            "start": day.isoformat(),
+            "end": (day + timedelta(days=1)).isoformat(),
+            "backgroundColor": color,
+            "textColor": self.get_contrast_color(color),
+            "allDay": True,
+            "overflowCount": count
+        }
+
     def get_view_range(self, view, current_dt, settings):
         start = datetime(current_dt.year, current_dt.month, current_dt.day)
         if view == "timeGridDay":
@@ -186,6 +293,20 @@ class Calendar(BasePlugin):
             return icalendar.Calendar.from_ical(response.text)
         except Exception as e:
             raise RuntimeError(f"Failed to fetch iCalendar url: {str(e)}")
+
+    def parse_ics_color(self, value):
+        """
+        Normalise a color defined in the calendar to hex. RFC 7986 COLOR carries a CSS3
+        name ("palevioletred"), while X-APPLE-CALENDAR-COLOR carries hex; accept both.
+        """
+        if not value:
+            return None
+        try:
+            r, g, b = ImageColor.getrgb(str(value).strip())[:3]
+        except ValueError:
+            logger.debug(f"Ignoring unrecognised calendar color: {value}")
+            return None
+        return f"#{r:02x}{g:02x}{b:02x}"
 
     def get_contrast_color(self, color):
         """

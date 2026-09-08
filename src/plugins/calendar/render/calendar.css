@@ -71,3 +71,154 @@ th {
 .fc table {
   font-size: var(--fc-table-font-size) !important;
 }
+/* ---------------------------------------------------------------------------
+   All-day row
+
+   FullCalendar stacks all-day events vertically and lets the row grow without
+   bound, which pushes the time grid down until late events fall off the panel.
+   The plugin caps the row at two lines server-side; these rules pack the events
+   across each line instead of down, and pin the row to a fixed height.
+   --------------------------------------------------------------------------- */
+
+.fc .fc-timegrid-axis {
+  padding: 0 4px !important;
+}
+
+.fc .fc-timegrid-axis-frame {
+  justify-content: center;
+}
+
+/* Keep the "all-day" label from wrapping into a second line and dragging the row taller. */
+.fc .fc-timegrid-axis-cushion {
+  max-width: none;
+  padding: 0;
+  font-size: var(--fc-small-font-size);
+  line-height: 1.1;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.fc .fc-daygrid-body-natural .fc-daygrid-day-events {
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
+
+.fc-timeGridDay-view .fc-daygrid-day-frame,
+.fc-timeGridWeek-view .fc-daygrid-day-frame,
+.fc-timeGrid-view .fc-daygrid-day-frame {
+  padding: 1px !important;
+}
+
+/* Single column, so events are packed across the full width.
+
+   Grid rather than flex: "exactly N per line" must not depend on sub-pixel basis
+   arithmetic. The grid is taken out of flow because otherwise its intrinsic width
+   (N x the widest title) inflates the day cell and pushes columns off the panel;
+   absolute positioning lets the cell size normally while the frame's fixed height
+   guarantees the row can never grow a third line and eat into the time grid. */
+.fc-timeGridDay-view .fc-daygrid-day-events {
+  --all-day-row-height: calc(
+    var(--all-day-lines) * var(--all-day-line-height) +
+    (var(--all-day-lines) - 1) * var(--all-day-gap)
+  );
+}
+
+.fc-timeGridDay-view .fc-daygrid-day-frame {
+  position: relative;
+  height: calc(
+    var(--all-day-lines) * var(--all-day-line-height) +
+    (var(--all-day-lines) - 1) * var(--all-day-gap) + 2px
+  );
+}
+
+.fc-timeGridDay-view .fc-daygrid-day-events {
+  position: absolute !important;
+  top: 1px;
+  right: 1px;
+  bottom: 1px;
+  left: 1px;
+  display: grid;
+  grid-template-columns: repeat(var(--all-day-per-line), minmax(0, 1fr));
+  grid-auto-rows: var(--all-day-line-height);
+  gap: var(--all-day-gap);
+  align-content: start;
+  min-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden;
+}
+
+.fc-timeGridDay-view .fc-daygrid-event-harness {
+  position: relative !important;
+  top: auto !important;
+  left: auto !important;
+  right: auto !important;
+  width: auto !important;
+  height: auto !important;
+  min-width: 0;
+  margin: 0 !important;
+}
+
+/* The plugin does its own overflow accounting, so FullCalendar's own more-link
+   placeholder must not claim a cell. */
+.fc-timeGridDay-view .fc-daygrid-day-bottom {
+  display: none !important;
+}
+
+/* FullCalendar clearfixes this container; as a grid it would turn those pseudo
+   elements into two real cells and shunt the first event out of column one. */
+.fc-timeGridDay-view .fc-daygrid-day-events::before,
+.fc-timeGridDay-view .fc-daygrid-day-events::after {
+  display: none !important;
+}
+
+/* FullCalendar measures the all-day content and pins an inline pixel width on the
+   table; keep it inside the panel instead of letting it scroll off the right. */
+.fc-timeGridDay-view .fc-daygrid-body,
+.fc-timeGridDay-view .fc-daygrid-body > table {
+  width: 100% !important;
+}
+
+.fc-timeGridDay-view .fc-daygrid-event-harness > .fc-daygrid-event {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  margin: 0 !important;
+  padding: 0 3px;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.fc-timeGridDay-view .fc-daygrid-event .fc-event-title,
+.fc-timeGridDay-view .fc-daygrid-event .fc-event-time {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  line-height: 1.1;
+}
+
+/* Week views keep the native vertical stack, but the row is still capped. */
+.fc-timeGridWeek-view .fc-daygrid-event,
+.fc-timeGrid-view .fc-daygrid-event {
+  margin-top: 0 !important;
+  margin-bottom: 1px !important;
+  padding: 0 2px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.fc-all-day-overflow {
+  width: 100%;
+  text-align: center;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Nothing scrolls on a static panel: the scrollbar only steals width from the last
+   day column and leaves a grey stripe down the edge of the render. */
+.fc .fc-scroller {
+  overflow: hidden !important;
+}
