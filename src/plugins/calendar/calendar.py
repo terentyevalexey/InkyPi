@@ -7,6 +7,7 @@ import icalendar
 import recurring_ical_events
 from io import BytesIO
 import logging
+import time
 from utils.http_client import get_http_session
 from collections import defaultdict
 from urllib.parse import urlsplit
@@ -19,6 +20,11 @@ TIME_GRID_VIEWS = ("timeGridDay", "timeGridWeek", "timeGrid")
 
 # The all-day row is capped at two lines so it can never squeeze the time grid.
 ALL_DAY_MAX_LINES = 2
+
+# Connect and read timeouts per calendar request. The shared session retries three
+# times, so an unreachable host costs this much again on every attempt; keep it
+# short enough that one sick calendar cannot hold the whole refresh hostage.
+CALENDAR_TIMEOUT = (10, 20)
 
 CALDAV_NAMESPACES = {"D": "DAV:", "C": "urn:ietf:params:xml:ns:caldav",
                      "A": "http://apple.com/ns/ical/"}
@@ -105,7 +111,9 @@ class Calendar(BasePlugin):
 
         # Fetch events using settings for auth and color logic
         logger.debug(f"Fetching events for {start} --> [{view_dt}] --> {end}")
+        fetch_started = time.monotonic()
         events = self.fetch_ics_events(sources, tz, start, end, settings)
+        fetch_seconds = time.monotonic() - fetch_started
 
         if not events:
             logger.warning("No events found for provided iCal URLs")
@@ -134,7 +142,12 @@ class Calendar(BasePlugin):
             "show_now_indicator": settings.get("displayNowIndicator") == "true" and day_offset == 0
         }
 
+        render_started = time.monotonic()
         image = self.render_image(dimensions, "calendar.html", "calendar.css", template_params)
+        logger.info(
+            "Calendar timing: fetch %.1fs, render %.1fs, %d events",
+            fetch_seconds, time.monotonic() - render_started, len(events)
+        )
 
         if not image:
             raise RuntimeError("Failed to take screenshot, please check logs.")
@@ -152,10 +165,27 @@ class Calendar(BasePlugin):
         use_ics_colors = settings.get('useIcsColors') == 'true'
         all_day_color = settings.get('allDayColor') if settings.get('useAllDayColor') == 'true' else None
 
+        failed = []
         for source in sources:
             color = source["color"]
-            cal = self.fetch_calendar(source, tz, start_range, end_range)
-            events = recurring_ical_events.of(cal).between(start_range, end_range)
+            host = urlsplit(source["url"]).hostname
+            started = time.monotonic()
+            try:
+                cal = self.fetch_calendar(source, tz, start_range, end_range)
+                fetched = time.monotonic()
+                events = recurring_ical_events.of(cal).between(start_range, end_range)
+            except Exception as e:
+                # One unreachable calendar used to abort the render and leave the
+                # panel with nothing; show the calendars that did answer instead.
+                failed.append(host)
+                logger.warning("Skipping calendar %s after %.1fs: %s",
+                               host, time.monotonic() - started, e)
+                continue
+            logger.info(
+                "  %s %s: download %.1fs, expand %.1fs, %d events",
+                "caldav" if source["caldav"] else "ics  ",
+                host, fetched - started, time.monotonic() - fetched, len(events)
+            )
             contrast_color = self.get_contrast_color(color)
             # Attendance is matched against the login for this calendar, since each
             # calendar now carries its own.
@@ -203,6 +233,8 @@ class Calendar(BasePlugin):
 
                 parsed_events.append(parsed_event)
 
+        if failed and len(failed) == len(sources):
+            raise RuntimeError(f"No calendar could be reached: {', '.join(failed)}")
         return parsed_events
     
     def get_all_day_per_line(self, settings, view=None):
@@ -454,7 +486,7 @@ class Calendar(BasePlugin):
             return self.fetch_caldav(url, source["auth"], tz, start_range, end_range)
 
         try:
-            response = get_http_session().get(url, auth=source["auth"], timeout=30)
+            response = get_http_session().get(url, auth=source["auth"], timeout=CALENDAR_TIMEOUT)
             response.raise_for_status()
             return icalendar.Calendar.from_ical(response.text)
         except Exception as e:
@@ -504,7 +536,8 @@ class Calendar(BasePlugin):
         """
         try:
             response = get_http_session().request(
-                method, url, data=body.encode("utf-8"), auth=auth, timeout=30,
+                method, url, data=body.encode("utf-8"), auth=auth,
+                timeout=CALENDAR_TIMEOUT,
                 headers={"Depth": depth, "Content-Type": "application/xml; charset=utf-8"},
             )
         except Exception as e:

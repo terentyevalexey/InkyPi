@@ -396,3 +396,40 @@ class TestCaldavHrefNamespaces:
 
     def test_wrong_namespace_finds_nothing(self, calendar):
         assert calendar.caldav_href(_Resp(HOME_RESPONSE), "D:calendar-home-set") is None
+
+
+class TestFetchResilience:
+
+    def _sources(self, count=2):
+        return [{"url": f"https://cal{i}.example/x", "color": "#007bff",
+                 "auth": None, "caldav": False} for i in range(count)]
+
+    def test_one_dead_calendar_does_not_blank_the_display(self, calendar, monkeypatch):
+        import pytz
+        good = [{"title": "meeting", "start": f"{DAY}T10:00:00+03:00", "allDay": False}]
+
+        def fetch(source, tz, start, end):
+            if source["url"].startswith("https://cal0"):
+                raise RuntimeError("No route to host")
+            return "ok"
+
+        monkeypatch.setattr(calendar, "fetch_calendar", fetch)
+        monkeypatch.setattr("plugins.calendar.calendar.recurring_ical_events",
+                            type("M", (), {"of": staticmethod(
+                                lambda cal: type("B", (), {"between": staticmethod(
+                                    lambda s, e: [])})())}))
+
+        events = calendar.fetch_ics_events(
+            self._sources(), pytz.utc, datetime(2026, 9, 8), datetime(2026, 9, 9), {})
+        assert events == []          # reached the end instead of raising
+
+    def test_all_calendars_failing_is_still_an_error(self, calendar, monkeypatch):
+        import pytz
+
+        def fetch(source, tz, start, end):
+            raise RuntimeError("No route to host")
+
+        monkeypatch.setattr(calendar, "fetch_calendar", fetch)
+        with pytest.raises(RuntimeError, match="No calendar could be reached"):
+            calendar.fetch_ics_events(
+                self._sources(), pytz.utc, datetime(2026, 9, 8), datetime(2026, 9, 9), {})
