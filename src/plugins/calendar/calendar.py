@@ -138,6 +138,7 @@ class Calendar(BasePlugin):
             "all_day_lines": all_day_lines,
             "all_day_per_line": all_day_columns,
             "day_grid_weeks": self.get_day_grid_weeks(settings),
+            "locale_script": self.get_locale_script(settings),
             # Marking "now" on a day that is not today is meaningless.
             "show_now_indicator": settings.get("displayNowIndicator") == "true" and day_offset == 0
         }
@@ -237,6 +238,19 @@ class Calendar(BasePlugin):
             raise RuntimeError(f"No calendar could be reached: {', '.join(failed)}")
         return parsed_events
     
+    def get_locale_script(self, settings):
+        """
+        The locale file to load, or None for English, which the main bundle carries.
+
+        Only one language is ever rendered, so the combined 79-locale bundle would be
+        parsed in full to use a single entry. Checked against LOCALE_MAP so the value
+        cannot be turned into a path.
+        """
+        language = settings.get("language")
+        if not language or language == "en" or language not in LOCALE_MAP:
+            return None
+        return f"{language}.global.min.js"
+
     def get_all_day_per_line(self, settings, view=None):
         """
         How many all-day events fit on one line of the row. Week views give each day

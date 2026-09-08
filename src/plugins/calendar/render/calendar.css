@@ -81,21 +81,27 @@ th {
    --------------------------------------------------------------------------- */
 
 .fc .fc-timegrid-axis {
-  padding: 0 4px !important;
+  padding: 0 1px !important;
 }
 
 .fc .fc-timegrid-axis-frame {
   justify-content: center;
 }
 
-/* Keep the "all-day" label from wrapping into a second line and dragging the row taller. */
+/* Keep the all-day label on one line so it cannot drag the row taller, but let it
+   ellipsize rather than slicing a glyph in half: the text is translated, and
+   "Весь день" or "Ganztägig" is far wider than the "10:00" that sizes this column. */
 .fc .fc-timegrid-axis-cushion {
-  max-width: none;
+  /* Not max-width: none. Letting the cushion grow past its cell is exactly how the
+     label ends up clipped mid-glyph, because the cell is what does the clipping. */
+  max-width: 100%;
   padding: 0;
   font-size: var(--fc-small-font-size);
   line-height: 1.1;
   text-align: center;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .fc .fc-daygrid-body-natural .fc-daygrid-day-events {

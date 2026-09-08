@@ -433,3 +433,21 @@ class TestFetchResilience:
         with pytest.raises(RuntimeError, match="No calendar could be reached"):
             calendar.fetch_ics_events(
                 self._sources(), pytz.utc, datetime(2026, 9, 8), datetime(2026, 9, 9), {})
+
+
+class TestLocaleScript:
+
+    @pytest.mark.parametrize(
+        "language,expected",
+        [
+            ("ru", "ru.global.min.js"),
+            ("de-at", "de-at.global.min.js"),
+            ("en", None),          # the main bundle already carries English
+            ("", None),
+            (None, None),
+            ("../../../etc/passwd", None),   # not a known locale, so never a path
+            ("zz", None),
+        ],
+    )
+    def test_only_a_known_locale_is_loaded(self, calendar, language, expected):
+        assert calendar.get_locale_script({"language": language}) == expected
