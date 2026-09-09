@@ -138,6 +138,18 @@
         </div>
 
         <div class="form-group nowrap">
+            <label for="dayOverEventTime">Event Time:</label>
+            <select id="dayOverEventTime" name="dayOverEventTime" class="form-input">
+                <option value="">Same as above</option>
+                <option value="true">Show</option>
+                <option value="false">Hide</option>
+            </select>
+            <span class="form-hint">A day grid has an hour axis beside it, so the time on
+              each event repeats the row it sits in. A multi-week grid has no axis, so
+              without the time an event says only which day it falls on.</span>
+        </div>
+
+        <div class="form-group nowrap">
             <input type="checkbox" id="dayOverNotBefore" name="dayOverNotBefore" value="false" onclick="this.value=this.checked ? 'true' : 'false';">
             <span>Not before:</span>
             <input type="time" id="dayOverNotBeforeTime" name="dayOverNotBeforeTime" class="form-input" value="16:00">
@@ -470,6 +482,8 @@
                 pluginSettings.dayOverView ?? 'timeGridWeek';
             document.getElementById('dayOverNotBeforeTime').value =
                 pluginSettings.dayOverNotBeforeTime || '16:00';
+            document.getElementById('dayOverEventTime').value =
+                pluginSettings.dayOverEventTime || '';
             for (const [id, on] of [
                 ['dayOverNotBefore', pluginSettings.dayOverNotBefore === 'true'],
                 ['dayOverIncludeAllDay', pluginSettings.dayOverIncludeAllDay === 'true'],

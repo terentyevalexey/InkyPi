@@ -133,12 +133,13 @@ class Calendar(BasePlugin):
         # is today.
         handover = self.resolve_day_over_view(
             view, events, current_dt, settings, tz, day_offset, failed)
+        handed_over = False
         if handover:
             try:
                 start, end, initial_date = self.get_view_range(handover, view_dt, settings)
                 events, failed = self.fetch_ics_events(sources, tz, start, end, settings)
                 logger.info("Day is over, showing %s instead", handover)
-                view = handover
+                view, handed_over = handover, True
             except Exception as e:
                 # The day's own events are still in hand and renderable, because the
                 # assignment that would have replaced them never completed. Refusing
@@ -168,6 +169,7 @@ class Calendar(BasePlugin):
             "plugin_settings": settings,
             "time_format": time_format,
             "font_scale": FONT_SIZES.get(settings.get("fontSize", "normal"), 1.0),
+            "display_event_time": self.show_event_time(settings, handed_over),
             "all_day_lines": all_day_lines,
             "all_day_per_line": all_day_columns,
             "day_grid_weeks": self.get_day_grid_weeks(settings),
@@ -520,6 +522,22 @@ class Calendar(BasePlugin):
             if visible_end > now:
                 return False
         return True
+
+    @staticmethod
+    def show_event_time(settings, handed_over):
+        """
+        Whether events carry their start time, which the handover may answer
+        differently from the day it replaced.
+
+        A day grid has an hour axis beside it, so the time on each event repeats
+        what the row already says. A multi-week grid has no axis at all, so without
+        the time an event says only that it happens that day.
+        """
+        if handed_over:
+            override = settings.get("dayOverEventTime")
+            if override in ("true", "false"):
+                return override == "true"
+        return settings.get("displayEventTime") == "true"
 
     def day_over_earliest(self, now, settings, tz):
         """The clock time before which the handover is held back, or None."""

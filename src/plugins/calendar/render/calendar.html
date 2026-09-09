@@ -203,7 +203,7 @@
             slotMinTime: "{{ plugin_settings.startTimeInterval or 00}}:00:00",
             slotMaxTime: "{{ plugin_settings.endTimeInterval or 24}}:00:00",
             eventTimeFormat: timeFormat,
-            displayEventTime: {{ (plugin_settings.displayEventTime == "true") | tojson}},
+            displayEventTime: {{ display_event_time | tojson }},
             weekends:  {{ (plugin_settings.displayWeekends == "true") | tojson}},
             nowIndicator: {{ show_now_indicator | tojson }},
             {# Overlapping events sit side by side rather than stacked: the default

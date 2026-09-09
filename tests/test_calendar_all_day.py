@@ -784,3 +784,40 @@ class TestHandoverWiring:
         assert params["view"] == "dayGrid"
         assert params["day_grid_weeks"] == 4
         assert (fetched[1][1] - fetched[1][0]).days == 4 * 7
+
+
+class TestEventTimeOverride:
+
+    @pytest.mark.parametrize(
+        "day_setting,override,handed_over,expected",
+        [
+            # Without a handover the override is irrelevant, whatever it says.
+            ("true", "", False, True),
+            ("false", "", False, False),
+            ("false", "true", False, False),
+            ("true", "false", False, True),
+            # After a handover it decides, and an empty value means "same as above".
+            ("false", "true", True, True),    # no time on the day, time on the grid
+            ("true", "false", True, False),
+            ("true", "", True, True),
+            ("false", "", True, False),
+            # Anything unrecognised falls back rather than reading as false.
+            ("true", "nonsense", True, True),
+            ("true", None, True, True),
+        ],
+    )
+    def test_override_only_applies_after_a_handover(
+            self, calendar, day_setting, override, handed_over, expected):
+        settings = {"displayEventTime": day_setting, "dayOverEventTime": override}
+        assert calendar.show_event_time(settings, handed_over) is expected
+
+    def test_reaches_the_template(self, calendar, monkeypatch):
+        # The one place it is consumed is the template parameter, so a handover has
+        # to carry the override all the way there.
+        wiring = TestHandoverWiring()
+        _, params = wiring.run(
+            calendar, monkeypatch, [],
+            {"dayOverView": "dayGrid", "displayEventTime": "false",
+             "dayOverEventTime": "true"})
+        assert params["view"] == "dayGrid"
+        assert params["display_event_time"] is True
