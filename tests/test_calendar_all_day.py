@@ -2,7 +2,9 @@ import os
 import sys
 from datetime import datetime
 
+import icalendar
 import pytest
+import pytz
 
 # The calendar plugin imports siblings as top-level modules ("utils.app_utils"),
 # so the src directory has to be importable in its own right.
@@ -419,9 +421,10 @@ class TestFetchResilience:
                                 lambda cal: type("B", (), {"between": staticmethod(
                                     lambda s, e: [])})())}))
 
-        events = calendar.fetch_ics_events(
+        events, failed = calendar.fetch_ics_events(
             self._sources(), pytz.utc, datetime(2026, 9, 8), datetime(2026, 9, 9), {})
-        assert events == []          # reached the end instead of raising
+        assert events == []               # reached the end instead of raising
+        assert failed == ["cal0.example"]  # and said which one dropped out
 
     def test_all_calendars_failing_is_still_an_error(self, calendar, monkeypatch):
         import pytz
@@ -451,3 +454,326 @@ class TestLocaleScript:
     )
     def test_only_a_known_locale_is_loaded(self, calendar, language, expected):
         assert calendar.get_locale_script({"language": language}) == expected
+
+
+# Moscow, matching the device: a fixed-offset zone, so the arithmetic is checkable
+# by eye. A DST-transition case is covered separately with a zone that has one.
+TZ = pytz.timezone("Europe/Moscow")
+GRID = {"startTimeInterval": "10", "endTimeInterval": "20"}
+
+
+def at(hhmm, day=DAY):
+    """An aware datetime on the test day."""
+    hour, minute = (int(part) for part in hhmm.split(":"))
+    return TZ.localize(datetime(*(int(p) for p in day.split("-")), hour, minute))
+
+
+def span(start, end, day=DAY, **extra):
+    """A timed event between two HH:MM points."""
+    event = timed(at(start, day).isoformat())
+    event["end"] = at(end, day).isoformat()
+    event.update(extra)
+    return event
+
+
+class TestDayIsSpent:
+
+    def spent(self, calendar, events, now="18:00", settings=None):
+        merged = dict(GRID, **(settings or {}))
+        grid_start, grid_end = calendar.day_bounds(at(now).date(), merged, TZ)
+        return calendar.day_is_spent(events, at(now), grid_start, grid_end, merged, TZ)
+
+    @pytest.mark.parametrize(
+        "events,now,expected",
+        [
+            ([], "18:00", True),                         # nothing at all
+            ([span("10:00", "11:00")], "18:00", True),   # long finished
+            ([span("19:00", "20:00")], "18:00", False),  # still ahead
+            ([span("17:00", "19:00")], "18:00", False),  # under way right now
+            ([span("17:00", "18:00")], "18:00", True),   # ended exactly now
+            # An event outside the rendered hours cannot be seen, so counting it
+            # would pin an empty grid to the panel all evening.
+            ([span("21:00", "22:00")], "18:00", True),   # after the grid ends
+            ([span("08:00", "09:00")], "18:00", True),   # before it starts
+            # Only the visible part counts: this one runs to 23:00, the grid to 20:00.
+            ([span("19:00", "23:00")], "19:30", False),
+            ([span("19:00", "23:00")], "20:01", True),
+        ],
+    )
+    def test_visible_portion_decides(self, calendar, events, now, expected):
+        assert self.spent(calendar, events, now) is expected
+
+    def test_zero_length_event_does_not_pin_the_day(self, calendar):
+        # Neither DTEND nor DURATION is zero duration per RFC 5545; inventing a
+        # default length would hold the day open for time it does not occupy.
+        reminder = timed(at("17:00").isoformat())
+        assert self.spent(calendar, [reminder], "16:00") is False
+        assert self.spent(calendar, [reminder], "17:01") is True
+
+    def test_other_days_are_ignored(self, calendar):
+        # The handover fetch is wider than a day, so tomorrow must not read as
+        # something still to come today.
+        assert self.spent(calendar, [span("09:00", "10:00", day="2026-09-09")]) is True
+
+    def test_overnight_event_counts_only_while_it_runs(self, calendar):
+        overnight = timed(at("23:00", "2026-09-07").isoformat())
+        overnight["end"] = at("11:00").isoformat()
+        assert self.spent(calendar, [overnight], "10:30") is False
+        assert self.spent(calendar, [overnight], "11:30") is True
+
+    @pytest.mark.parametrize(
+        "settings,expected",
+        [
+            ({}, True),                                  # all-day ignored by default
+            ({"dayOverIncludeAllDay": "true"}, False),   # ...until asked for
+        ],
+    )
+    def test_all_day_events_only_count_when_asked(self, calendar, settings, expected):
+        assert self.spent(calendar, [all_day()], settings=settings) is expected
+
+    def test_included_all_day_event_holds_the_whole_day(self, calendar):
+        # An all-day event has no end within the day, so when it counts at all it
+        # counts until midnight.
+        assert self.spent(
+            calendar, [all_day()], "23:30", {"dayOverIncludeAllDay": "true"}) is False
+
+    def test_multi_day_all_day_event_covers_the_middle(self, calendar):
+        vacation = all_day("vacation", start="2026-09-07", end="2026-09-12")
+        assert self.spent(
+            calendar, [vacation], settings={"dayOverIncludeAllDay": "true"}) is False
+
+    @pytest.mark.parametrize(
+        "settings,expected",
+        [
+            ({}, True),                                      # free time discounted
+            ({"dayOverIgnoreTransparent": "false"}, False),  # ...unless it is not
+        ],
+    )
+    def test_transparent_events_are_discounted_by_default(self, calendar, settings, expected):
+        free = span("19:00", "20:00", transparent=True)
+        assert self.spent(calendar, [free], settings=settings) is expected
+
+    def test_cancelled_events_never_count(self, calendar):
+        # A cancelled event left in the feed would otherwise pin the day forever,
+        # and unlike transparency that is not a matter of taste.
+        dropped = span("19:00", "20:00", cancelled=True)
+        assert self.spent(calendar, [dropped]) is True
+        assert self.spent(
+            calendar, [dropped], settings={"dayOverIgnoreTransparent": "false"}) is True
+
+    def test_dst_transition_day(self, calendar):
+        # Europe/Moscow has no DST, so use a zone that does: on this day two events
+        # carry different offsets, which is why the strings cannot be compared as
+        # text and the bounds cannot be built by adding to an aware midnight.
+        tz = pytz.timezone("Europe/Berlin")
+        early = tz.localize(datetime(2026, 10, 25, 1, 30)).isoformat()
+        late = tz.localize(datetime(2026, 10, 25, 18, 0)).isoformat()
+        assert early[-6:] != late[-6:]        # the offsets really do differ
+
+        event = timed(late)
+        event["end"] = tz.localize(datetime(2026, 10, 25, 19, 0)).isoformat()
+        grid_start, grid_end = calendar.day_bounds(datetime(2026, 10, 25).date(), GRID, tz)
+        now = tz.localize(datetime(2026, 10, 25, 17, 0))
+        assert calendar.day_is_spent([event], now, grid_start, grid_end, GRID, tz) is False
+
+
+class TestDayBounds:
+
+    def test_hours_come_from_the_grid_settings(self, calendar):
+        start, end = calendar.day_bounds(at("12:00").date(), GRID, TZ)
+        assert (start, end) == (at("10:00"), at("20:00"))
+
+    def test_end_hour_may_be_midnight(self, calendar):
+        # "24" cannot be expressed with replace(hour=...), which is why the bounds
+        # are built by adding to midnight instead.
+        start, end = calendar.day_bounds(
+            at("12:00").date(), {"startTimeInterval": "0", "endTimeInterval": "24"}, TZ)
+        assert start == at("00:00")
+        assert end == TZ.localize(datetime(2026, 9, 9))
+
+
+class TestResolveDayOverView:
+
+    BASE = dict(GRID, dayOverView="timeGridWeek")
+
+    def resolve(self, calendar, settings=None, events=None, now="18:00",
+                view="timeGridDay", offset=0, failed=None):
+        return calendar.resolve_day_over_view(
+            view, events if events is not None else [], at(now),
+            dict(self.BASE, **(settings or {})), TZ, offset, failed or [])
+
+    def test_switches_once_the_day_is_spent(self, calendar):
+        assert self.resolve(calendar) == "timeGridWeek"
+
+    def test_stays_put_while_something_remains(self, calendar):
+        assert self.resolve(calendar, events=[span("19:00", "20:00")]) is None
+
+    def test_multi_week_is_also_offered(self, calendar):
+        assert self.resolve(calendar, {"dayOverView": "dayGrid"}) == "dayGrid"
+
+    @pytest.mark.parametrize("value", ["", None, "listMonth", "timeGridDay", "nonsense"])
+    def test_only_known_targets_switch(self, calendar, value):
+        # An unknown view would reach get_view_range and fail there, so anything
+        # outside the allowlist -- a value left behind by an older form included --
+        # means the handover is simply off.
+        assert self.resolve(calendar, {"dayOverView": value}) is None
+
+    def test_only_the_day_view_hands_over(self, calendar):
+        assert self.resolve(calendar, view="timeGridWeek") is None
+
+    def test_an_offset_day_never_hands_over(self, calendar):
+        # "Nothing left today" says nothing about a day rendered at an offset,
+        # where every event is wholly ahead or wholly behind.
+        assert self.resolve(calendar, offset=1) is None
+
+    def test_a_calendar_that_dropped_out_blocks_the_switch(self, calendar):
+        # A failed source reads exactly like an empty one, and acting on it would
+        # flip the panel to the week and back as the host recovers -- a 40s
+        # repaint each way.
+        assert self.resolve(calendar, failed=["work.example"]) is None
+
+    @pytest.mark.parametrize(
+        "now,expected",
+        [
+            ("15:59", None),            # held back
+            ("16:00", "timeGridWeek"),  # exactly at the floor
+            ("17:30", "timeGridWeek"),
+        ],
+    )
+    def test_earliest_time_holds_the_switch_back(self, calendar, now, expected):
+        settings = {"dayOverNotBefore": "true", "dayOverNotBeforeTime": "16:00"}
+        assert self.resolve(calendar, settings, now=now) == expected
+
+    def test_earliest_time_is_ignored_when_the_toggle_is_off(self, calendar):
+        settings = {"dayOverNotBefore": "false", "dayOverNotBeforeTime": "16:00"}
+        assert self.resolve(calendar, settings, now="11:00") == "timeGridWeek"
+
+    @pytest.mark.parametrize("value", ["", "nonsense", "25:00", "12:xx"])
+    def test_an_unusable_earliest_time_does_not_block(self, calendar, value):
+        settings = {"dayOverNotBefore": "true", "dayOverNotBeforeTime": value}
+        assert self.resolve(calendar, settings, now="11:00") == "timeGridWeek"
+
+
+class TestEventTransparency:
+
+    @pytest.mark.parametrize(
+        "transp,busy,expected",
+        [
+            (None, True, False),          # absent means OPAQUE, per RFC 5545
+            ("OPAQUE", True, False),
+            ("TRANSPARENT", True, True),
+            ("transparent", True, True),  # the case is not guaranteed
+            # A calendar marked not-busy overrides its events, which is how a
+            # vacation calendar of individually OPAQUE entries is discounted.
+            ("OPAQUE", False, True),
+            (None, False, True),
+        ],
+    )
+    def test_transparency_sources(self, calendar, transp, busy, expected):
+        event = {"transp": icalendar.prop.vText(transp)} if transp else {}
+        assert calendar.is_transparent(event, {"busy": busy}) is expected
+
+    def test_busy_defaults_to_true_for_older_instances(self, calendar):
+        assert calendar.is_transparent({}, {}) is False
+
+
+class TestCalendarBusySetting:
+
+    def test_busy_is_zipped_per_calendar(self, calendar):
+        sources = calendar.get_calendar_sources({
+            "calendarURLs[]": ["https://a.example", "https://b.example"],
+            "calendarBusy[]": ["yes", "no"],
+        })
+        assert [s["busy"] for s in sources] == [True, False]
+
+    def test_missing_busy_array_defaults_to_busy(self, calendar):
+        # Instances saved before this setting existed must keep working.
+        sources = calendar.get_calendar_sources({
+            "calendarURLs[]": ["https://a.example", "https://b.example"]})
+        assert [s["busy"] for s in sources] == [True, True]
+
+
+class FakeDeviceConfig:
+    def get_resolution(self):
+        return (800, 480)
+
+    def get_config(self, key, default=None):
+        return {"timezone": "Europe/Moscow", "time_format": "24h"}.get(key, default)
+
+
+class TestHandoverWiring:
+    """generate_image's ordering: the switch has to land before the view is remapped
+    and before the all-day row is laid out for it."""
+
+    SETTINGS = dict(
+        GRID, viewMode="timeGridDay", calendarURLs=["https://a.example"],
+        dayOverView="timeGridWeek", nowIndicatorInterval="60",
+    )
+
+    def run(self, calendar, monkeypatch, events, settings=None):
+        merged = dict(self.SETTINGS, **(settings or {}))
+        merged["calendarURLs[]"] = merged.pop("calendarURLs")
+        fetched, captured = [], {}
+
+        def fetch(sources, tz, start, end, s):
+            fetched.append((start, end))
+            return list(events), []
+
+        monkeypatch.setattr(calendar, "fetch_ics_events", fetch)
+        monkeypatch.setattr(calendar, "render_image",
+                            lambda dims, html, css, params: captured.update(params) or "image")
+        calendar.generate_image(merged, FakeDeviceConfig())
+        return fetched, captured
+
+    def test_a_spent_day_hands_over_and_refetches_the_wider_window(self, calendar, monkeypatch):
+        past = span("10:00", "11:00", day=datetime.now(TZ).date().isoformat())
+        fetched, params = self.run(calendar, monkeypatch, [past])
+
+        # timeGridWeek is remapped to the rolling timeGrid, which only happens if the
+        # switch landed before that step.
+        assert params["view"] == "timeGrid"
+        assert len(fetched) == 2                       # day window, then the week
+        assert (fetched[1][1] - fetched[1][0]).days == 7
+
+    def test_a_day_with_something_left_fetches_once(self, calendar, monkeypatch):
+        today = datetime.now(TZ).date().isoformat()
+        ahead = span("10:00", "23:59", day=today)
+        fetched, params = self.run(calendar, monkeypatch, [ahead])
+
+        assert params["view"] == "timeGridDay"
+        assert len(fetched) == 1
+        assert (fetched[0][1] - fetched[0][0]).days == 1
+
+    def test_handover_off_never_refetches(self, calendar, monkeypatch):
+        fetched, params = self.run(calendar, monkeypatch, [], {"dayOverView": ""})
+        assert params["view"] == "timeGridDay"
+        assert len(fetched) == 1
+
+    def test_a_failed_second_fetch_falls_back_to_the_day(self, calendar, monkeypatch):
+        # The day's events are already in hand, so a wider window that cannot be
+        # fetched must not cost the panel its render.
+        merged = dict(self.SETTINGS)
+        merged["calendarURLs[]"] = merged.pop("calendarURLs")
+        calls, captured = [], {}
+
+        def fetch(sources, tz, start, end, s):
+            calls.append((start, end))
+            if len(calls) > 1:
+                raise RuntimeError("No calendar could be reached")
+            return [], []
+
+        monkeypatch.setattr(calendar, "fetch_ics_events", fetch)
+        monkeypatch.setattr(calendar, "render_image",
+                            lambda dims, html, css, params: captured.update(params) or "image")
+        assert calendar.generate_image(merged, FakeDeviceConfig()) == "image"
+        assert captured["view"] == "timeGridDay"
+        # initial_date was rolled back to the day view's, not left on the week's.
+        assert captured["initial_date"] == datetime.now(TZ).date().isoformat()
+
+    def test_multi_week_handover_uses_the_grid_span(self, calendar, monkeypatch):
+        fetched, params = self.run(
+            calendar, monkeypatch, [],
+            {"dayOverView": "dayGrid", "displayPastWeeks": "0", "displayWeeks": "3"})
+        assert params["view"] == "dayGrid"
+        assert params["day_grid_weeks"] == 4
+        assert (fetched[1][1] - fetched[1][0]).days == 4 * 7

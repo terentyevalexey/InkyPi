@@ -121,6 +121,44 @@
         <span class="form-hint">Rows before and after the current week, which is always shown.</span>
     </div>
 
+    <div class="form-group" data-visible-modes="timeGridDay">
+        <label class="form-label">When The Day Is Over</label>
+
+        <div class="form-group nowrap">
+            <label for="dayOverView">Switch To:</label>
+            <select id="dayOverView" name="dayOverView" class="form-input" onchange="updateViewDependentOptions()">
+                <option value="timeGridWeek">Week</option>
+                <option value="dayGrid">Multi-Week</option>
+                <option value="">Stay on today</option>
+            </select>
+            <span class="form-hint">Once nothing on today's grid is still to come, show
+              this instead of a spent day. The settings for the view chosen here appear
+              above, so it can be laid out exactly like a real week or multi-week
+              calendar.</span>
+        </div>
+
+        <div class="form-group nowrap">
+            <input type="checkbox" id="dayOverNotBefore" name="dayOverNotBefore" value="false" onclick="this.value=this.checked ? 'true' : 'false';">
+            <span>Not before:</span>
+            <input type="time" id="dayOverNotBeforeTime" name="dayOverNotBeforeTime" class="form-input" value="16:00">
+            <span class="form-hint">Keeps today's grid up through a quiet morning.</span>
+        </div>
+
+        <div class="form-group nowrap">
+            <input type="checkbox" id="dayOverIncludeAllDay" name="dayOverIncludeAllDay" value="false" onclick="this.value=this.checked ? 'true' : 'false';">
+            <span>All-day events keep the day open</span>
+            <span class="form-hint">Off by default: an all-day event runs to midnight, so
+              counting it would hold today's grid up all evening.</span>
+        </div>
+
+        <div class="form-group nowrap">
+            <input type="checkbox" id="dayOverIgnoreTransparent" name="dayOverIgnoreTransparent" value="true" checked onclick="this.value=this.checked ? 'true' : 'false';">
+            <span>Ignore events marked free</span>
+            <span class="form-hint">Events the calendar marks transparent, and every event
+              from a calendar set to Free below, do not count as something still to come.</span>
+        </div>
+    </div>
+
     <div class="form-group nowrap">
         <label for="dayOffset">Day Offset:</label>
         <input type="number" id="dayOffset" name="dayOffset" class="form-input" min="-365" max="365" placeholder="0">
@@ -182,15 +220,29 @@
       const value = button.getAttribute('data-value');
       document.getElementById('viewMode').value = value;
 
-      updateViewDependentOptions(value);
+      updateViewDependentOptions();
     }
 
-    function updateViewDependentOptions(viewMode) {
+    // A day view that hands over when the day is over renders two views, so both
+    // sets of options have to be reachable: the handover is meant to be laid out
+    // exactly like a real week or multi-week calendar, and those fields are hidden
+    // (and therefore never submitted) while the stored view is the day.
+    function activeViewModes() {
+        const views = [document.getElementById('viewMode').value];
+        const dayOver = document.getElementById('dayOverView');
+        if (views[0] === 'timeGridDay' && dayOver && dayOver.value) {
+            views.push(dayOver.value);
+        }
+        return views;
+    }
+
+    function updateViewDependentOptions() {
         const conditionals = document.querySelectorAll('[data-visible-modes]');
+        const active = activeViewModes();
 
         conditionals.forEach(el => {
             const allowedViews = el.getAttribute('data-visible-modes').split(',');
-            const shouldShow = allowedViews.includes(viewMode);
+            const shouldShow = allowedViews.some(view => active.includes(view));
 
             el.style.display = shouldShow ? '' : 'none';
 
@@ -206,7 +258,7 @@
     // calendar arrays lined up with each other.
     function addCalendarInput(calendar = {}, before = null) {
         const { url = '', color = '#007BFF', username = '', password = '',
-                kind = 'ics', name = '' } = calendar;
+                kind = 'ics', name = '', busy = 'yes' } = calendar;
         const calendarList = document.getElementById('calendarList');
 
         const wrapper = document.createElement('div');
@@ -288,7 +340,22 @@
         passwordInput.classList.add('form-input');
         passwordInput.value = password;
 
-        authRow.append(kindSelect, nameInput, userInput, passwordInput);
+        // A select rather than a checkbox: every calendar field is a parallel
+        // array, and an unchecked checkbox submits nothing, which would shift every
+        // later calendar's settings onto the wrong row.
+        const busySelect = document.createElement('select');
+        busySelect.name = 'calendarBusy[]';
+        busySelect.classList.add('form-input');
+        busySelect.title = 'Whether this calendar’s events count as something still to come';
+        for (const [value, text] of [['yes', 'Busy'], ['no', 'Free']]) {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = text;
+            busySelect.appendChild(option);
+        }
+        busySelect.value = busy;
+
+        authRow.append(kindSelect, busySelect, nameInput, userInput, passwordInput);
 
         wrapper.append(urlRow, authRow);
         if (before) {
@@ -397,6 +464,22 @@
             document.getElementById('useAttendeeColor').checked = pluginSettings.useAttendeeColor;
             document.getElementById('useAttendeeColor').value = pluginSettings.useAttendeeColor;
             
+            // Defaults to the week view rather than off, so opening a day instance
+            // and saving it turns the handover on, which is what was asked for.
+            document.getElementById('dayOverView').value =
+                pluginSettings.dayOverView ?? 'timeGridWeek';
+            document.getElementById('dayOverNotBeforeTime').value =
+                pluginSettings.dayOverNotBeforeTime || '16:00';
+            for (const [id, on] of [
+                ['dayOverNotBefore', pluginSettings.dayOverNotBefore === 'true'],
+                ['dayOverIncludeAllDay', pluginSettings.dayOverIncludeAllDay === 'true'],
+                // The only one defaulting on, so an absent value must not read false.
+                ['dayOverIgnoreTransparent', pluginSettings.dayOverIgnoreTransparent !== 'false'],
+            ]) {
+                const box = document.getElementById(id);
+                box.checked = on;
+                box.value = on ? 'true' : 'false';
+            }
             document.getElementById('dayOffset').value = pluginSettings.dayOffset || '';
             document.getElementById('displayPastWeeks').value = pluginSettings.displayPastWeeks || '';
 
@@ -406,6 +489,7 @@
                 const passwords = pluginSettings["calendarPasswords[]"] || [];
                 const kinds = pluginSettings["calendarTypes[]"] || [];
                 const names = pluginSettings["calendarNames[]"] || [];
+                const busy = pluginSettings["calendarBusy[]"] || [];
 
                 // Instances saved before per-calendar logins existed carry a single
                 // shared credential. Show it on every row so it is visible, and can be
@@ -418,7 +502,8 @@
                     username: migrating ? (pluginSettings.loginUsername || '') : (usernames[i] || ''),
                     password: migrating ? (pluginSettings.loginPassword || '') : (passwords[i] || ''),
                     kind: kinds[i] || 'ics',
-                    name: names[i] || ''
+                    name: names[i] || '',
+                    busy: busy[i] || 'yes'
                 }));
             }
         }
@@ -440,6 +525,6 @@
         // populate calendars
         calendars.forEach(calendar => addCalendarInput(calendar));
 
-        updateViewDependentOptions(viewMode)
+        updateViewDependentOptions();
     });
 </script>
