@@ -404,7 +404,7 @@ class TestFetchResilience:
 
     def _sources(self, count=2):
         return [{"url": f"https://cal{i}.example/x", "color": "#007bff",
-                 "auth": None, "caldav": False} for i in range(count)]
+                 "auth": None, "caldav": False, "busy": True} for i in range(count)]
 
     def test_one_dead_calendar_does_not_blank_the_display(self, calendar, monkeypatch):
         import pytz
@@ -423,8 +423,8 @@ class TestFetchResilience:
 
         events, failed = calendar.fetch_ics_events(
             self._sources(), pytz.utc, datetime(2026, 9, 8), datetime(2026, 9, 9), {})
-        assert events == []               # reached the end instead of raising
-        assert failed == ["cal0.example"]  # and said which one dropped out
+        assert events == []                        # reached the end, not an error
+        assert [f["host"] for f in failed] == ["cal0.example"]  # named the dropout
 
     def test_all_calendars_failing_is_still_an_error(self, calendar, monkeypatch):
         import pytz
@@ -630,7 +630,14 @@ class TestResolveDayOverView:
         # A failed source reads exactly like an empty one, and acting on it would
         # flip the panel to the week and back as the host recovers -- a 40s
         # repaint each way.
-        assert self.resolve(calendar, failed=["work.example"]) is None
+        failed = [{"host": "work.example", "busy": True}]
+        assert self.resolve(calendar, failed=failed) is None
+
+    def test_a_calendar_marked_free_does_not_block(self, calendar):
+        # Its events never hold the day open, so its absence cannot change the
+        # answer; blocking on it would strand the day view for nothing.
+        failed = [{"host": "vacation.example", "busy": False}]
+        assert self.resolve(calendar, failed=failed) == "timeGridWeek"
 
     @pytest.mark.parametrize(
         "now,expected",

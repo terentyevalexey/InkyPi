@@ -211,7 +211,9 @@ class Calendar(BasePlugin):
             except Exception as e:
                 # One unreachable calendar used to abort the render and leave the
                 # panel with nothing; show the calendars that did answer instead.
-                failed.append(host)
+                # Kept with its busy flag: only a calendar that could have held
+                # the day open is able to change the handover decision by dropping out.
+                failed.append({"host": host, "busy": source["busy"]})
                 logger.warning("Skipping calendar %s after %.1fs: %s",
                                host, time.monotonic() - started, e)
                 continue
@@ -275,7 +277,8 @@ class Calendar(BasePlugin):
                 parsed_events.append(parsed_event)
 
         if failed and len(failed) == len(sources):
-            raise RuntimeError(f"No calendar could be reached: {', '.join(failed)}")
+            hosts = ', '.join(f["host"] for f in failed)
+            raise RuntimeError(f"No calendar could be reached: {hosts}")
         # The failures come back with the events, because a caller deciding whether
         # today is finished must not read a calendar that dropped out as an empty one.
         return parsed_events, failed
@@ -540,11 +543,15 @@ class Calendar(BasePlugin):
         target = settings.get("dayOverView")
         if view != "timeGridDay" or day_offset or target not in DAY_OVER_VIEWS:
             return None
-        if failed:
+        # Only a calendar whose events count towards the decision can veto it. One
+        # marked Free never holds the day open, so its absence cannot change the
+        # answer, and letting it block would strand the day view for nothing.
+        blocking = [f["host"] for f in failed if f["busy"]]
+        if blocking:
             # A calendar that dropped out reads exactly like an empty one, so acting
             # on it would flip the panel to the week and back as the host recovers.
             # A full repaint costs 40s on e-paper; stay on the configured view.
-            logger.info("Keeping the day view: %s did not answer", ", ".join(failed))
+            logger.info("Keeping the day view: %s did not answer", ", ".join(blocking))
             return None
         earliest = self.day_over_earliest(now, settings, tz)
         if earliest and now < earliest:
